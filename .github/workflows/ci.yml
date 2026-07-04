@@ -1,0 +1,52 @@
+# .github/workflows/ci.yml — lint, typecheck, eval suite
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Linting ───────────────────────────────────────────
+      - name: Ruff check
+        run: ruff check .
+
+      - name: Mypy typecheck
+        run: mypy --ignore-missing-imports .
+
+      # ── Eval suites (unit-level, no API key needed) ───────
+      - name: Eval — gate
+        run: pytest evals/eval_gate.py -v
+
+      - name: Eval — retrieval
+        run: pytest evals/eval_retrieval.py -v
+
+      - name: Eval — API
+        run: pytest evals/eval_api.py -v
+
+      # ── Integration tests (require GOOGLE_API_KEY) ────────
+      - name: Eval — reviewer (integration)
+        if: ${{ env.GOOGLE_API_KEY != '' }}
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: pytest evals/eval_reviewer.py -v -m integration

@@ -1,0 +1,26 @@
+# requirements.txt — pinned dependencies for adversarial code review
+# Regenerate lock with: pip-compile requirements.in (if using pip-tools)
+
+# ── Core framework ──────────────────────────────────────────
+google-adk==1.3.0
+mcp==1.9.3
+fastapi==0.115.12
+uvicorn[standard]==0.34.3
+pydantic==2.11.3
+
+# ── Database ────────────────────────────────────────────────
+sqlalchemy==2.0.41
+psycopg2-binary==2.9.10
+
+# ── Retrieval / embeddings ──────────────────────────────────
+chromadb==1.0.7
+sentence-transformers==4.1.0
+
+# ── Static analysis / testing (also in sandbox image) ───────
+ruff==0.8.6
+mypy==1.14.1
+pytest==8.3.4
+bandit==1.8.3
+
+# ── Observability ──────────────────────────────────────────
+prometheus-client==0.21.1

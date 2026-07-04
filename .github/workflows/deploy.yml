@@ -1,0 +1,95 @@
+# .github/workflows/deploy.yml — build, push, and deploy
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ${{ secrets.DOCKER_REGISTRY || 'ghcr.io' }}
+  IMAGE_PREFIX: ${{ secrets.DOCKER_IMAGE_PREFIX || github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME || github.actor }}
+          password: ${{ secrets.DOCKER_PASSWORD || secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata — service image
+        id: meta-service
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/service
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta-service.outputs.tags }}
+          labels: ${{ steps.meta-service.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Docker metadata — sandbox image
+        id: meta-sandbox
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/sandbox
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push sandbox image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/sandbox.Dockerfile
+          push: true
+          tags: ${{ steps.meta-sandbox.outputs.tags }}
+          labels: ${{ steps.meta-sandbox.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  migrate:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run database migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_API_KEY: "unused-for-migrations"
+        run: python -c "from storage.db import run_migrations; run_migrations()"

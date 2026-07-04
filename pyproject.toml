@@ -1,0 +1,38 @@
+[project]
+name = "adversarial-code-review"
+version = "0.1.0"
+description = "LLM-powered adversarial code review with structured debate and automated quality gates"
+requires-python = ">= 3.12"
+license = "MIT"
+
+[tool.ruff]
+line-length = 99
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",  # line length handled by formatter
+]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["evals"]
+markers = [
+    "integration: tests that require external services (e.g. Gemini API)",
+]

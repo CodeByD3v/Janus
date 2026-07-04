@@ -1,0 +1,77 @@
+# docker-compose.yml — local development stack
+# Start:  docker compose up --build
+# Env:    copy .env.example to .env and fill in secrets
+
+services:
+  # ── API server ──────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: "postgresql+psycopg2://janus:janus@db:5432/janus"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+      USE_CONTAINERIZED_GATE: "true"
+      SANDBOX_IMAGE: "adv-review-sandbox:latest"
+      CHROMA_PERSIST_DIR: "/app/chroma_store"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    volumes:
+      - chroma_store:/app/chroma_store
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Background worker ──────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "worker.py"]
+    environment:
+      DATABASE_URL: "postgresql+psycopg2://janus:janus@db:5432/janus"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+      USE_CONTAINERIZED_GATE: "true"
+      SANDBOX_IMAGE: "adv-review-sandbox:latest"
+      CHROMA_PERSIST_DIR: "/app/chroma_store"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    volumes:
+      - chroma_store:/app/chroma_store
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # worker spawns sandbox containers
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── PostgreSQL ─────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: janus
+      POSTGRES_PASSWORD: janus
+      POSTGRES_DB: janus
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U janus"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Sandbox image builder (build-only, no runtime) ─────────
+  sandbox-builder:
+    build:
+      context: .
+      dockerfile: docker/sandbox.Dockerfile
+    image: adv-review-sandbox:latest
+    entrypoint: ["echo", "sandbox image built"]
+    profiles:
+      - build
+
+volumes:
+  pgdata:
+  chroma_store:
