@@ -1,4 +1,5 @@
 # Janus
+<<<<<<< HEAD
 
 ## Adversarial Code Review — Patcher vs. Reviewer Agents
 
@@ -100,3 +101,6 @@ the version submitted for judging.
   false-positive rate.
 - Demo scope is a single Python file; no evaluation yet on a corpus of
   held-out historical PRs with known shipped bugs.
+=======
+Adversarial code review between two LLM agents , a Reviewer grounded in retrieved historical bug examples keeps the Patcher honest, and a strict automated gate has sole merge authority.
+>>>>>>> c1ca81723d60b8d3c5785ab25bb22ccf4eb42ff6
