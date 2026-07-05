@@ -24,8 +24,8 @@ from typing import Optional
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from config import settings
-from observability import get_logger
+from core.config import settings
+from core.observability import get_logger
 from storage.models import Base, DebateSession
 
 logger = get_logger(__name__)

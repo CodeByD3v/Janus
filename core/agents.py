@@ -28,7 +28,7 @@ from google.adk.tools.mcp_tool import MCPToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
 from mcp import StdioServerParameters
 
-from config import settings
+from core.config import settings
 
 _gate_toolset_full = MCPToolset(
     connection_params=StdioConnectionParams(

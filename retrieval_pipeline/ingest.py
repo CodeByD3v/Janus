@@ -25,8 +25,8 @@ from sentence_transformers import SentenceTransformer
 # Resolve project-root imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import settings  # noqa: E402
-from observability import get_logger  # noqa: E402
+from core.config import settings  # noqa: E402
+from core.observability import get_logger  # noqa: E402
 from retrieval_pipeline.schema import RealCatchExample, validate_record  # noqa: E402
 
 logger = get_logger(__name__)

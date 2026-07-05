@@ -31,10 +31,10 @@ from typing import Any
 from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
 
-from agents import build_patcher, build_reviewer
-from config import settings
-from gate import run_full_gate, sandbox_copy
-from observability import CostTracker, LLMCallStats, get_logger, metrics
+from core.agents import build_patcher, build_reviewer
+from core.config import settings
+from core.gate import run_full_gate, sandbox_copy
+from core.observability import CostTracker, LLMCallStats, get_logger, metrics
 from storage.db import get_session
 from storage.models import DebateSession, Round
 
@@ -381,7 +381,7 @@ async def run_debate(
     agent instances, and DB records.
     """
     # Lazy import to avoid circular dependency at module load time
-    from retrieval import retrieve_examples, format_examples_for_prompt
+    from core.retrieval import retrieve_examples, format_examples_for_prompt
 
     debate_id = debate_id or str(uuid.uuid4())
     cost_tracker = CostTracker()
@@ -626,6 +626,6 @@ if __name__ == "__main__":
         "10% discount when total quantity across items is >= 50, and must "
         "not mutate the caller's input list/objects — return a new list."
     )
-    demo_repo = str(Path(__file__).parent / "demo_repo")
+    demo_repo = str(Path(__file__).parent.parent / "demo_repo")
     outcome = asyncio.run(run_debate(demo_repo, "inventory.py", ticket))
     print_debate_summary(outcome)

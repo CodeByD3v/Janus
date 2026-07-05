@@ -32,8 +32,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from config import settings
-from observability import get_logger
+from core.config import settings
+from core.observability import get_logger
 
 logger = get_logger(__name__)
 

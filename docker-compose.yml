@@ -29,7 +29,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["python", "worker.py"]
+    command: ["python", "-m", "core.worker"]
     environment:
       DATABASE_URL: "postgresql+psycopg2://janus:janus@db:5432/janus"
       GOOGLE_API_KEY: "${GOOGLE_API_KEY}"

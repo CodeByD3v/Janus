@@ -19,8 +19,8 @@ from typing import Any
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-from config import settings
-from observability import get_logger
+from core.config import settings
+from core.observability import get_logger
 
 logger = get_logger(__name__)
 

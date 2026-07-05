@@ -25,8 +25,8 @@ from typing import Optional
 from fastapi import HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 
-from config import settings
-from observability import get_logger
+from core.config import settings
+from core.observability import get_logger
 
 logger = get_logger(__name__)
 

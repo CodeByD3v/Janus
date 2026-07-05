@@ -28,8 +28,8 @@ from api.schemas import (
     HealthResponse,
     RoundResponse,
 )
-from config import settings
-from observability import get_logger, metrics
+from core.config import settings
+from core.observability import get_logger, metrics
 from storage.db import get_session, run_migrations
 from storage.models import DebateSession
 

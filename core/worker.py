@@ -25,8 +25,8 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
-from config import settings
-from observability import get_logger
+from core.config import settings
+from core.observability import get_logger
 from storage.db import claim_queued_session, get_session, run_migrations
 from storage.models import DebateSession
 
@@ -141,7 +141,7 @@ class Worker:
 
             try:
                 # Import here to avoid circular imports at module level
-                from orchestrator import run_debate
+                from core.orchestrator import run_debate
 
                 result = await run_debate(
                     repo_dir=repo_ref,
