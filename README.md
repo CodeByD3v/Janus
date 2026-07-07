@@ -1,5 +1,9 @@
 # Adversarial Code Review — Patcher vs. Reviewer Agents
 
+<div align="center">
+  <img src="Janus.jpg"/>
+</div>
+
 A production service for adversarial code-review debates. A Patcher agent
 proposes fixes, a Reviewer agent critiques them with executable
 counterexamples, and a deterministic gate (real lint/type/test/security

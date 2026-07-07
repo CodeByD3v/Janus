@@ -45,8 +45,7 @@ def _optional_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         print(
-            f"WARNING: env var {name!r} has non-integer value {raw!r}, "
-            f"using default {default}",
+            f"WARNING: env var {name!r} has non-integer value {raw!r}, using default {default}",
             file=sys.stderr,
         )
         return default
@@ -66,9 +65,7 @@ class Settings:
 
     # --- Database ---
     DATABASE_URL: str = field(
-        default_factory=lambda: _optional(
-            "DATABASE_URL", "sqlite:///./adversarial_code_review.db"
-        )
+        default_factory=lambda: _optional("DATABASE_URL", "sqlite:///./adversarial_code_review.db")
     )
 
     # --- Retrieval ---
@@ -85,8 +82,32 @@ class Settings:
         )
     )
     EMBEDDING_MODEL: str = field(
+        default_factory=lambda: _optional("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    )
+
+    # --- Repository-Context Retrieval (GAP 14) ---
+    # Separate from the behavioral retrieval settings above — this tunes
+    # core/repo_context.py's structural scan of the live sandboxed repo,
+    # not the ChromaDB behavioral store.
+    REPO_CONTEXT_MAX_FILES_SCANNED: int = field(
+        default_factory=lambda: _optional_int("REPO_CONTEXT_MAX_FILES_SCANNED", 200)
+    )
+    REPO_CONTEXT_MAX_PRIOR_FIXES: int = field(
+        default_factory=lambda: _optional_int("REPO_CONTEXT_MAX_PRIOR_FIXES", 5)
+    )
+    REPO_CONTEXT_MAX_TEST_SAMPLES: int = field(
+        default_factory=lambda: _optional_int("REPO_CONTEXT_MAX_TEST_SAMPLES", 5)
+    )
+    REPO_CONTEXT_SNIPPET_CHARS: int = field(
+        default_factory=lambda: _optional_int("REPO_CONTEXT_SNIPPET_CHARS", 400)
+    )
+    REPO_CONTEXT_GIT_TIMEOUT: int = field(
+        default_factory=lambda: _optional_int("REPO_CONTEXT_GIT_TIMEOUT", 10)
+    )
+    REPO_CONTEXT_FIX_KEYWORDS: str = field(
         default_factory=lambda: _optional(
-            "EMBEDDING_MODEL", "all-MiniLM-L6-v2"
+            "REPO_CONTEXT_FIX_KEYWORDS",
+            "fix,bug,patch,issue,crash,regression,hotfix",
         )
     )
 
@@ -97,18 +118,13 @@ class Settings:
     SANDBOX_MEMORY_LIMIT: str = field(
         default_factory=lambda: _optional("SANDBOX_MEMORY_LIMIT", "512m")
     )
-    SANDBOX_CPU_LIMIT: str = field(
-        default_factory=lambda: _optional("SANDBOX_CPU_LIMIT", "1")
-    )
-    SANDBOX_PID_LIMIT: int = field(
-        default_factory=lambda: _optional_int("SANDBOX_PID_LIMIT", 128)
-    )
-    SANDBOX_TIMEOUT: int = field(
-        default_factory=lambda: _optional_int("SANDBOX_TIMEOUT", 120)
-    )
+    SANDBOX_CPU_LIMIT: str = field(default_factory=lambda: _optional("SANDBOX_CPU_LIMIT", "1"))
+    SANDBOX_PID_LIMIT: int = field(default_factory=lambda: _optional_int("SANDBOX_PID_LIMIT", 128))
+    SANDBOX_TIMEOUT: int = field(default_factory=lambda: _optional_int("SANDBOX_TIMEOUT", 120))
     USE_CONTAINERIZED_GATE: bool = field(
-        default_factory=lambda: _optional("USE_CONTAINERIZED_GATE", "false").lower()
-        in ("true", "1", "yes")
+        default_factory=lambda: (
+            _optional("USE_CONTAINERIZED_GATE", "false").lower() in ("true", "1", "yes")
+        )
     )
 
     # --- API ---
@@ -132,8 +148,9 @@ class Settings:
     # --- Observability ---
     LOG_LEVEL: str = field(default_factory=lambda: _optional("LOG_LEVEL", "INFO"))
     METRICS_ENABLED: bool = field(
-        default_factory=lambda: _optional("METRICS_ENABLED", "true").lower()
-        in ("true", "1", "yes")
+        default_factory=lambda: (
+            _optional("METRICS_ENABLED", "true").lower() in ("true", "1", "yes")
+        )
     )
 
     # --- MCP Server ---
@@ -154,16 +171,12 @@ class Settings:
         if not self.DATABASE_URL:
             raise ValueError("DATABASE_URL is required for the worker")
         if not self.GOOGLE_API_KEY:
-            raise ValueError(
-                "GOOGLE_API_KEY is required for the worker to call the LLM API"
-            )
+            raise ValueError("GOOGLE_API_KEY is required for the worker to call the LLM API")
 
     def validate_for_debate(self) -> None:
         """Validate settings required to run a debate."""
         if not self.GOOGLE_API_KEY:
-            raise ValueError(
-                "GOOGLE_API_KEY is required to run debates (set it via env var)"
-            )
+            raise ValueError("GOOGLE_API_KEY is required to run debates (set it via env var)")
 
 
 # Singleton — constructed once at import time.

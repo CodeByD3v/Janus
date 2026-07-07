@@ -13,6 +13,12 @@ Hardening (GAP 5, 6, 7 fixes):
 - Reviewer prose-without-test detection + logging
 - Per-round persistence so in-flight debates survive crashes
 - All print() replaced with structured logging via observability.py
+
+Retrieval (GAP 8, GAP 14):
+- Behavioral retrieval (retrieval.py) and repository-context retrieval
+  (repo_context.py) both run fresh every round, since the code under
+  review changes each round. They are two distinct sources rendered
+  into two distinct prompt slots — see agents.py.
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ CODE_BLOCK_RE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
 # ---------------------------------------------------------------------------
 # Circuit Breaker
 # ---------------------------------------------------------------------------
+
 
 class CircuitBreaker:
     """Simple circuit breaker for LLM API calls.
@@ -118,6 +125,7 @@ _circuit_breaker = CircuitBreaker()
 # Data classes
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class RoundLog:
     round_num: int
@@ -125,6 +133,7 @@ class RoundLog:
     reviewer_text: str
     gate_result: dict[str, Any]
     retrieved_example_ids: list[str] = field(default_factory=list)
+    repo_context_signals: dict[str, Any] = field(default_factory=dict)
     stop_reason: str | None = None
     code_extraction_failed: bool = False
     reviewer_skipped_counterexample: bool = False
@@ -142,6 +151,7 @@ class DebateResult:
 # ---------------------------------------------------------------------------
 # LLM call with retry + circuit breaker
 # ---------------------------------------------------------------------------
+
 
 async def _ask(
     runner: InMemoryRunner,
@@ -216,14 +226,14 @@ async def _ask(
                 break
 
     raise RuntimeError(
-        f"LLM call failed after {max_retries} attempts. "
-        f"Last error: {last_exception}"
+        f"LLM call failed after {max_retries} attempts. Last error: {last_exception}"
     )
 
 
 # ---------------------------------------------------------------------------
 # Code extraction
 # ---------------------------------------------------------------------------
+
 
 def _extract_code(text: str, fallback: str) -> tuple[str, bool]:
     """Extract a Python code block from the agent's response.
@@ -246,6 +256,7 @@ def _extract_code(text: str, fallback: str) -> tuple[str, bool]:
 # ---------------------------------------------------------------------------
 # Reviewer counterexample detection
 # ---------------------------------------------------------------------------
+
 
 def _check_reviewer_wrote_test(
     sandbox: Path, pre_existing_tests: set[str], reviewer_text: str
@@ -279,6 +290,7 @@ def _check_reviewer_wrote_test(
 # ---------------------------------------------------------------------------
 # Persistence helpers
 # ---------------------------------------------------------------------------
+
 
 def _persist_session_start(
     debate_id: str,
@@ -314,6 +326,7 @@ def _persist_round(
             reviewer_text=round_log.reviewer_text,
             gate_result_json=json.dumps(round_log.gate_result),
             retrieved_example_ids_json=json.dumps(round_log.retrieved_example_ids),
+            repo_context_signals_json=json.dumps(round_log.repo_context_signals),
             stop_reason=round_log.stop_reason,
             code_extraction_failed=round_log.code_extraction_failed,
             reviewer_skipped_counterexample=round_log.reviewer_skipped_counterexample,
@@ -361,6 +374,7 @@ def _persist_session_end(
 # Main debate loop
 # ---------------------------------------------------------------------------
 
+
 async def run_debate(
     repo_dir: str,
     target_file: str,
@@ -381,7 +395,8 @@ async def run_debate(
     agent instances, and DB records.
     """
     # Lazy import to avoid circular dependency at module load time
-    from core.retrieval import retrieve_examples, format_examples_for_prompt
+    from core.repo_context import format_repo_context_for_prompt, retrieve_repo_context
+    from core.retrieval import format_examples_for_prompt, retrieve_examples
 
     debate_id = debate_id or str(uuid.uuid4())
     cost_tracker = CostTracker()
@@ -421,7 +436,10 @@ async def run_debate(
 
     try:
         patch_text = await _ask(
-            patcher_runner, patcher_session, user_id, patch_prompt,
+            patcher_runner,
+            patcher_session,
+            user_id,
+            patch_prompt,
             cost_tracker=cost_tracker,
         )
     except RuntimeError as e:
@@ -454,10 +472,25 @@ async def run_debate(
             )
             examples = []
 
-        reviewer_agent = build_reviewer(format_examples_for_prompt(examples))
-        reviewer_runner = InMemoryRunner(
-            agent=reviewer_agent, app_name=settings.APP_NAME
+        # Repo-context retrieval (GAP 14): a separate, structural source —
+        # re-read from the live sandbox every round so it always reflects
+        # the current patch, not a stale snapshot from round 1.
+        try:
+            repo_context = retrieve_repo_context(str(sandbox), target_file, current_code)
+        except Exception as e:
+            logger.warning(
+                "repo_context_retrieval_failed",
+                debate_id=debate_id,
+                round_num=round_num,
+                error=str(e),
+            )
+            repo_context = {}
+
+        reviewer_agent = build_reviewer(
+            format_examples_for_prompt(examples),
+            format_repo_context_for_prompt(repo_context),
         )
+        reviewer_runner = InMemoryRunner(agent=reviewer_agent, app_name=settings.APP_NAME)
         reviewer_session = str(uuid.uuid4())
         await reviewer_runner.session_service.create_session(
             app_name=settings.APP_NAME, user_id=user_id, session_id=reviewer_session
@@ -476,7 +509,10 @@ async def run_debate(
 
         try:
             reviewer_text = await _ask(
-                reviewer_runner, reviewer_session, user_id, review_prompt,
+                reviewer_runner,
+                reviewer_session,
+                user_id,
+                review_prompt,
                 cost_tracker=cost_tracker,
             )
         except RuntimeError as e:
@@ -512,6 +548,11 @@ async def run_debate(
             reviewer_text=reviewer_text,
             gate_result=gate_result,
             retrieved_example_ids=[ex.get("id", "") for ex in examples],
+            repo_context_signals={
+                "callers": repo_context.get("call_graph", {}).get("callers", []),
+                "prior_fix_shas": [f.get("sha", "") for f in repo_context.get("prior_fixes", [])],
+                "test_convention_files": len(repo_context.get("test_conventions", [])),
+            },
             stop_reason=stop_reason,
             code_extraction_failed=extraction_failed,
             reviewer_skipped_counterexample=skipped_counterexample,
@@ -544,7 +585,10 @@ async def run_debate(
 
         try:
             patch_text = await _ask(
-                patcher_runner, patcher_session, user_id, fix_prompt,
+                patcher_runner,
+                patcher_session,
+                user_id,
+                fix_prompt,
                 cost_tracker=cost_tracker,
             )
         except RuntimeError as e:

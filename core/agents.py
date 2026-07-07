@@ -3,15 +3,17 @@ agents.py — the two ADK agents with asymmetric structure.
 
 DESIGN NOTE: Both agents use the same base Gemini model (controlled by
 the ADV_REVIEW_MODEL env var via config.py). The Reviewer's critique
-quality comes from retrieval-augmented few-shot examples pulled from a
-persistent, growable store of historical "real catch" review comments
-(see retrieval.py), NOT from fine-tuned weights.
+quality comes from two retrieval sources, not fine-tuned weights:
+- Behavioral retrieval (retrieval.py): historical "real catch" review
+  comments similar to the code pattern under review.
+- Repository-context retrieval (repo_context.py): structural facts about
+  THIS specific repo — call graph neighbors, prior fix commits, existing
+  test conventions.
 
 Fine-tuning the Reviewer on a large, mined dataset of PR comments that
-historically preceded a real bug-fix commit is explicit FUTURE WORK.
-The retrieval store is the seam where that future dataset plugs in —
-for now it starts with a curated seed set and grows via
-retrieval_pipeline/ingest.py.
+historically preceded a real bug-fix commit is explicit FUTURE WORK,
+and is not worth starting until both retrieval sources above are mature
+— see AGENTS.md's Fine-Tuning Interface section for the full picture.
 
 The structural asymmetry IS real and enforced in code, not just prompts:
 - Different MCP tool_filters enforce different capabilities
@@ -101,6 +103,16 @@ for now it draws on a persistent, incrementally-growable store.
 Retrieved examples:
 {retrieved_examples}
 
+Below is structural context about the repository itself — other places in
+this repo that call into or are called by the code you're reviewing, prior
+commits that fixed bugs in this same file, and how tests elsewhere in this
+repo are conventionally written. Use it to catch issues invisible from the
+patch alone, such as a signature change that breaks a caller elsewhere, or
+a bug being silently reintroduced after it was already fixed once.
+
+Repository context:
+{repo_context}
+
 Concretely:
 
 - IGNORE: naming preferences, formatting, comment style, minor
@@ -132,27 +144,29 @@ def build_patcher() -> LlmAgent:
     )
 
 
-def build_reviewer(retrieved_examples: str = "(none retrieved)") -> LlmAgent:
-    """Build the Reviewer agent, injecting retrieved few-shot "real catch"
-    examples into its instruction.
+def build_reviewer(
+    retrieved_examples: str = "(none retrieved)",
+    repo_context: str = "No repository context available.",
+) -> LlmAgent:
+    """Build the Reviewer agent, injecting two distinct retrieved contexts
+    into its instruction: behavioral examples (retrieval.py) and
+    repository-structure facts (repo_context.py).
 
-    `retrieved_examples` is a pre-formatted string produced by retrieval.py
-    — this function does no retrieval itself, it only renders the template.
-
-    NOTE: The Reviewer uses the same base model as the Patcher. Its
-    critique quality comes from retrieval-augmented few-shot grounding,
-    not from fine-tuned weights. Fine-tuning on a large mined dataset
-    is future work — see retrieval_pipeline/ for the ingestion seam.
+    Both arguments are pre-formatted strings — this function does no
+    retrieval itself, it only renders the template. Neither retrieval
+    source requires fine-tuned weights; fine-tuning remains future work
+    — see AGENTS.md's Fine-Tuning Interface section.
     """
     instruction = REVIEWER_INSTRUCTION_TEMPLATE.format(
-        retrieved_examples=retrieved_examples
+        retrieved_examples=retrieved_examples,
+        repo_context=repo_context,
     )
     return LlmAgent(
         model=settings.MODEL,
         name="reviewer",
         description=(
             "Critiques a proposed patch using executable counterexamples, "
-            "grounded in retrieved historical examples."
+            "grounded in retrieved historical examples and repository context."
         ),
         instruction=instruction,
         tools=[_reviewer_toolset],

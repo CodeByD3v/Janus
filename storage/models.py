@@ -21,16 +21,17 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
-    Index,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
 class Base(DeclarativeBase):
     """Base class for all ORM models."""
+
     pass
 
 
@@ -68,9 +69,7 @@ class DebateSession(Base):
         "Round", back_populates="session", order_by="Round.round_num"
     )
 
-    __table_args__ = (
-        Index("ix_debate_sessions_status_created", "status", "created_at"),
-    )
+    __table_args__ = (Index("ix_debate_sessions_status_created", "status", "created_at"),)
 
     @property
     def final_gate(self) -> dict[str, Any] | None:
@@ -124,6 +123,7 @@ class Round(Base):
     reviewer_text: str = Column(Text, nullable=False, default="")  # type: ignore[assignment]
     gate_result_json: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
     retrieved_example_ids_json: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
+    repo_context_signals_json: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
     stop_reason: Optional[str] = Column(String(64), nullable=True)  # type: ignore[assignment]
     code_extraction_failed: bool = Column(  # type: ignore[assignment]
         Boolean, nullable=False, default=False
@@ -161,6 +161,16 @@ class Round(Base):
     def retrieved_example_ids(self, value: list[str]) -> None:
         self.retrieved_example_ids_json = json.dumps(value)
 
+    @property
+    def repo_context_signals(self) -> dict[str, Any]:
+        if self.repo_context_signals_json:
+            return json.loads(self.repo_context_signals_json)  # type: ignore[arg-type]
+        return {}
+
+    @repo_context_signals.setter
+    def repo_context_signals(self, value: dict[str, Any]) -> None:
+        self.repo_context_signals_json = json.dumps(value)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "round_num": self.round_num,
@@ -168,6 +178,7 @@ class Round(Base):
             "reviewer_text": self.reviewer_text,
             "gate_result": self.gate_result,
             "retrieved_example_ids": self.retrieved_example_ids,
+            "repo_context_signals": self.repo_context_signals,
             "stop_reason": self.stop_reason,
             "code_extraction_failed": self.code_extraction_failed,
             "reviewer_skipped_counterexample": self.reviewer_skipped_counterexample,

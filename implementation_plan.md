@@ -733,6 +733,88 @@ deployed, how it's operated, what its guarantees are, and what's still
 explicitly future work (fine-tuning the Reviewer on a large mined dataset).
 See TASKS below.
 
+### GAP 14 — Reviewer has no repository context, only the one file it's handed
+The existing retrieval store (`retrieval.py`, GAP 8) answers "what does a real
+catch look like" via similarity search over curated example comments — it is
+entirely blind to the actual repo being reviewed. The Reviewer currently sees
+only the target file's contents; it has no visibility into callers, prior
+fixes to the same lines, or how similar code is already tested elsewhere in
+the repo. This is a distinct retrieval concern from GAP 8 (different query,
+different data source — the live repo, not a curated store — different
+freshness requirements) and must be its own module, not folded into
+`retrieval.py`. See TASK 15.
+
+This also means the "fine-tuning is future work" framing (GAP 1's honest
+framing, agents.py's docstring, AGENTS.md's Fine-Tuning Interface section)
+should be read as a three-layer target architecture, not fine-tuning vs.
+retrieval: repo-context retrieval (GAP 14, not yet built) + behavioral
+retrieval (GAP 8, built) + a fine-tuned Reviewer (not yet built, and not
+worth starting until both retrieval layers are mature) + the deterministic
+gate's execution (built). Each layer fixes a different failure mode; none
+substitutes for the others.
+
+### GAP 15 — Single API key means one rate limit for the whole service
+`config.py` currently reads one `GOOGLE_API_KEY`. Every Patcher and Reviewer
+call across every concurrent debate, across every tenant, draws from the same
+underlying quota. Under real multi-tenant load this becomes the throughput
+ceiling regardless of how many workers are running.
+
+Fix: a key pool, not a single key.
+- `config.py` reads `GOOGLE_API_KEYS` (comma-separated) instead of a single
+  `GOOGLE_API_KEY` — keep the singular var working as a one-key fallback so
+  existing deployments don't break.
+- A small `KeyPool` (new `llm_client.py`, or a class inside `config.py`) that
+  hands out keys round-robin per outgoing call, marks a key "cooling down"
+  for N seconds on a 429/rate-limit error, and skips cooling-down keys when
+  picking the next one.
+- Wire this into the existing retry loop around `_ask()` in orchestrator.py
+  (GAP 6) — on a rate-limit error, the retry should try the next key in the
+  pool before backing off on the same one.
+- Simplest alternative, if pooling feels like overkill to start: assign the
+  Patcher and Reviewer distinct keys statically (they're separate roles
+  already), which halves load per key with no pooling logic at all. Note in
+  AGENTS.md which approach was taken and why.
+- Document, per-key, in `observability.py`: which key (by index, never the
+  raw key) served which call, so usage/cost skew across keys is visible.
+
+### GAP 16 — deploy.yml builds and migrates, but deploys nowhere
+The existing `.github/workflows/deploy.yml` builds and pushes the service and
+sandbox images to a registry, and runs DB migrations — and stops there.
+Nothing pulls the new image onto a running host or restarts the service.
+"Push to main" today does not result in the live system actually changing.
+
+Fix — pick one deploy target and complete the pipeline. Given the worker
+spawns sibling containers for the gate (GAP 1), a serverless target (Cloud
+Run, Fargate without privileged mode) actively fights this pattern; prefer:
+- **Simplest**: add a step to `deploy.yml` that SSHes into a known host and
+  runs `docker compose pull && docker compose up -d`, matching the
+  docker-compose topology that already exists.
+- **More scalable**: Kubernetes, with the api/worker/sandbox topology mapped
+  from `docker-compose.yml` almost directly (api Deployment, worker
+  Deployment with a privileged/Docker-in-Docker sidecar or host socket mount,
+  Postgres as a managed service instead of in-cluster). Document the
+  privileged-pod tradeoff explicitly if this route is taken.
+Whichever is chosen, `deploy.yml` must end with the new image actually
+serving traffic, not just sitting in a registry.
+
+### GAP 17 — No visibility into a debate's outcome for the people whose code it reviewed
+Today the only way to see a debate's result is to already know its
+`debate_id` and call `GET /debates/{id}` directly. There is no integration
+with the place a developer would naturally look — the pull request itself.
+
+Fix — after `run_debate` completes (in `worker.py`, alongside the existing
+DB write), post the outcome where the relevant human already is:
+- **GitHub PR comment or Check Run**: the Reviewer's critique history and
+  final gate result, posted directly on the PR that triggered the debate —
+  this requires the initiating request to carry a PR/commit reference
+  through `DebateSession`, which `api/schemas.py`'s request model does not
+  currently support and should be extended to accept.
+- **Webhook/Slack notification** as a lighter-weight alternative or addition:
+  a summary + link to `GET /debates/{id}` posted to a configured webhook URL
+  on merge or reject.
+Neither requires a new UI — both are additional side effects at the end of
+an already-completed debate.
+
 ---
 
 ## Precise tasks — do these in order
@@ -817,13 +899,19 @@ Format: plain markdown. Sections:
 2. Agent roles table (Patcher / Reviewer — role, model, tools available, cannot do)
 3. MCP server contract
 4. Gate contract, including the container isolation guarantees from GAP 1
-5. Retrieval contract: what's in the store, how it's grown via
+5. Retrieval contract (behavioral): what's in the store, how it's grown via
    `retrieval_pipeline/ingest.py`, and its known limits
-6. Fine-tuning interface: what a production Reviewer fine-tuned on a large,
-   mined dataset would need to satisfy to replace the retrieval-augmented one
-7. Operational runbook: how to deploy, how to scale workers, how to rotate API
+6. Repository-context retrieval (planned): what it retrieves (call graph,
+   git history, test patterns), why it's a separate module from behavioral
+   retrieval, and its integration point (a `{repo_context}` prompt slot)
+7. Fine-tuning interface: the target three-layer architecture (repo-context
+   retrieval + behavioral retrieval + fine-tuned weights + execution), why
+   fine-tuning is deferred until both retrieval layers are mature, and what
+   a fine-tuned Reviewer would need to satisfy to replace the
+   retrieval-augmented one
+8. Operational runbook: how to deploy, how to scale workers, how to rotate API
    keys, what to check first when a debate is stuck
-8. Hard rules (things the agent must never do)
+9. Hard rules (things the agent must never do)
 
 ### TASK 14: Rewrite README.md (GAP 13)
 - Add a "What this is — and what it isn't" section up front: structural
@@ -834,6 +922,62 @@ Format: plain markdown. Sections:
   honesty" section mirroring AGENTS.md.
 - No separate writeup or design-doc file — README.md is the single source of
   truth for anyone reading the repo.
+
+### TASK 15: Build repo_context.py — repository-context retrieval (GAP 14)
+This is a separate retrieval concern from the existing behavioral retrieval
+in `retrieval.py` (GAP 8) — different query, different data source, different
+freshness requirements. Do not merge it into `retrieval.py`.
+
+Build `repo_context.py` exposing
+`retrieve_repo_context(repo_dir: str, target_file: str, current_code: str) -> dict`,
+returning at minimum:
+- **Call graph neighbors**: functions/classes calling, or called by, the
+  code under review (a simple AST-based traversal of the repo is sufficient
+  to start — no need for a full static-analysis toolchain up front).
+- **Git history**: prior commits touching the same lines, flagged if the
+  commit message suggests a bug fix (`git log -L` or `git blame` plus a
+  keyword heuristic on commit messages is sufficient to start).
+- **Existing test patterns**: how similar functions elsewhere in the repo
+  are already tested, so Reviewer-written counterexamples match repo
+  convention.
+
+Wire its output into a new `{repo_context}` slot in
+`REVIEWER_INSTRUCTION_TEMPLATE`, alongside — not replacing — the existing
+`{retrieved_examples}` slot, so the two retrieval sources stay legible and
+independently debuggable in the rendered instruction. Update
+`orchestrator.run_debate` to call `retrieve_repo_context` each round
+alongside `retrieve_examples`, and persist which repo-context signals were
+surfaced per round the same way `retrieved_example_ids` is persisted today.
+
+This is real, buildable now, and improves review quality independent of
+whether fine-tuning ever happens — build this before revisiting fine-tuning.
+
+### TASK 16: Add a multi-key pool for LLM calls (GAP 15)
+Change `config.py` to read `GOOGLE_API_KEYS` (plural, comma-separated) with
+`GOOGLE_API_KEY` (singular) kept working as a one-key fallback. Build a
+`KeyPool` that round-robins across keys and cools down any key that just hit
+a rate limit. Wire it into the existing retry logic around `_ask()` in
+orchestrator.py so a 429 tries the next key before backing off. Log which key
+index served each call in `observability.py`. If pooling is more than this
+warrants right now, the minimum acceptable version is: Patcher and Reviewer
+each get their own static key — note in AGENTS.md whichever approach was
+taken.
+
+### TASK 17: Complete the deploy pipeline (GAP 16)
+Extend `.github/workflows/deploy.yml` so it doesn't stop at "image pushed."
+Add the step that actually rolls the new image out — SSH + `docker compose
+pull && up -d` for the simplest version, or a Kubernetes apply step if that's
+the chosen target. Document the choice and, if Kubernetes, the privileged-pod
+tradeoff for the worker's sandbox-spawning requirement, in README.md.
+
+### TASK 18: Post debate outcomes where the developer already is (GAP 17)
+Extend `api/schemas.py`'s request model to optionally accept a PR/commit
+reference alongside `repo_ref`/`target_file`/`ticket`. After `run_debate`
+completes in `worker.py`, if a PR reference was provided, post the critique
+history and final gate result as a PR comment or Check Run. Otherwise (or in
+addition), support a configured webhook URL for a merge/reject summary. Keep
+both as optional side effects — a debate with no PR reference and no webhook
+configured behaves exactly as it does today.
 
 ---
 
