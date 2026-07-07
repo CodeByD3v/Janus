@@ -21,6 +21,14 @@ The structural asymmetry IS real and enforced in code, not just prompts:
 - The Reviewer can only write test files, not source files
 - This is enforced by the MCP server's tool dispatch, not by asking
   the model nicely
+
+KEY POOLING (GAP 15): both build_patcher() and build_reviewer() draw a
+model instance bound to one key from core.llm_client's KeyPool, instead
+of a plain model-name string. This spreads load across multiple Google
+API keys instead of hitting one key's rate limit as the sole ceiling.
+Each function returns (agent, key_index) so the caller can report a 429
+back to the pool via llm_client.get_key_pool().mark_rate_limited(index)
+without ever handling the raw key.
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
 from mcp import StdioServerParameters
 
 from core.config import settings
+from core.llm_client import build_model
 
 _gate_toolset_full = MCPToolset(
     connection_params=StdioConnectionParams(
@@ -133,36 +142,49 @@ Concretely:
   write test files, and run checks."""
 
 
-def build_patcher() -> LlmAgent:
-    """Build the Patcher agent with full gate toolset access."""
-    return LlmAgent(
-        model=settings.MODEL,
+def build_patcher() -> tuple[LlmAgent, int]:
+    """Build the Patcher agent with full gate toolset access.
+
+    Returns (agent, key_index) — key_index identifies which pool key this
+    agent is bound to, so a 429 can be reported back to the pool via
+    `llm_client.get_key_pool().mark_rate_limited(key_index)`.
+    """
+    model, key_index = build_model(settings.MODEL)
+    agent = LlmAgent(
+        model=model,
         name="patcher",
         description="Proposes and revises code patches for a given ticket.",
         instruction=PATCHER_INSTRUCTION,
         tools=[_gate_toolset_full],
     )
+    return agent, key_index
 
 
 def build_reviewer(
     retrieved_examples: str = "(none retrieved)",
     repo_context: str = "No repository context available.",
-) -> LlmAgent:
+) -> tuple[LlmAgent, int]:
     """Build the Reviewer agent, injecting two distinct retrieved contexts
     into its instruction: behavioral examples (retrieval.py) and
     repository-structure facts (repo_context.py).
 
-    Both arguments are pre-formatted strings — this function does no
+    Both text arguments are pre-formatted strings — this function does no
     retrieval itself, it only renders the template. Neither retrieval
     source requires fine-tuned weights; fine-tuning remains future work
     — see AGENTS.md's Fine-Tuning Interface section.
+
+    Returns (agent, key_index) — since this is called fresh every round
+    (see orchestrator.run_debate), the Reviewer gets a freshly-drawn key
+    from the pool every round, unlike the Patcher which is built once per
+    debate. See llm_client.py's module docstring for why.
     """
     instruction = REVIEWER_INSTRUCTION_TEMPLATE.format(
         retrieved_examples=retrieved_examples,
         repo_context=repo_context,
     )
-    return LlmAgent(
-        model=settings.MODEL,
+    model, key_index = build_model(settings.MODEL)
+    agent = LlmAgent(
+        model=model,
         name="reviewer",
         description=(
             "Critiques a proposed patch using executable counterexamples, "
@@ -171,3 +193,4 @@ def build_reviewer(
         instruction=instruction,
         tools=[_reviewer_toolset],
     )
+    return agent, key_index

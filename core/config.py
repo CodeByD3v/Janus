@@ -57,7 +57,15 @@ class Settings:
 
     # --- LLM ---
     MODEL: str = field(default_factory=lambda: _optional("ADV_REVIEW_MODEL", "gemini-2.5-flash"))
+    # Singular kept working as a one-key fallback — existing deployments
+    # that only set GOOGLE_API_KEY are unaffected by the pool (GAP 15).
     GOOGLE_API_KEY: str = field(default_factory=lambda: _optional("GOOGLE_API_KEY", ""))
+    # Comma-separated list of keys for the KeyPool (core/llm_client.py).
+    # If unset, google_api_keys() below falls back to [GOOGLE_API_KEY].
+    GOOGLE_API_KEYS: str = field(default_factory=lambda: _optional("GOOGLE_API_KEYS", ""))
+    GOOGLE_API_KEY_COOLDOWN_SECONDS: float = field(
+        default_factory=lambda: float(_optional("GOOGLE_API_KEY_COOLDOWN_SECONDS", "30"))
+    )
 
     # --- Debate ---
     MAX_ROUNDS: int = field(default_factory=lambda: _optional_int("ADV_REVIEW_MAX_ROUNDS", 5))
@@ -161,6 +169,19 @@ class Settings:
         )
     )
 
+    def google_api_keys(self) -> list[str]:
+        """Resolved list of keys for the KeyPool.
+
+        GOOGLE_API_KEYS (comma-separated) takes precedence if set; falls
+        back to a single-item list from GOOGLE_API_KEY; empty list if
+        neither is configured.
+        """
+        if self.GOOGLE_API_KEYS:
+            return [k.strip() for k in self.GOOGLE_API_KEYS.split(",") if k.strip()]
+        if self.GOOGLE_API_KEY:
+            return [self.GOOGLE_API_KEY]
+        return []
+
     def validate_for_api(self) -> None:
         """Validate settings required for the API server. Call at startup."""
         if not self.DATABASE_URL:
@@ -170,13 +191,20 @@ class Settings:
         """Validate settings required for the worker. Call at startup."""
         if not self.DATABASE_URL:
             raise ValueError("DATABASE_URL is required for the worker")
-        if not self.GOOGLE_API_KEY:
-            raise ValueError("GOOGLE_API_KEY is required for the worker to call the LLM API")
+        if not self.google_api_keys():
+            raise ValueError(
+                "At least one Google API key is required for the worker to "
+                "call the LLM API — set GOOGLE_API_KEYS (comma-separated) "
+                "or GOOGLE_API_KEY"
+            )
 
     def validate_for_debate(self) -> None:
         """Validate settings required to run a debate."""
-        if not self.GOOGLE_API_KEY:
-            raise ValueError("GOOGLE_API_KEY is required to run debates (set it via env var)")
+        if not self.google_api_keys():
+            raise ValueError(
+                "At least one Google API key is required to run debates — "
+                "set GOOGLE_API_KEYS (comma-separated) or GOOGLE_API_KEY"
+            )
 
 
 # Singleton — constructed once at import time.

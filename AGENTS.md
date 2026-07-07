@@ -297,12 +297,36 @@ docker compose up --build
 ### Required environment variables
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `GOOGLE_API_KEY` | Worker only | — | Gemini API key for LLM calls |
-| `API_KEYS` | API | — | `key1:tenant1,key2:tenant2` format |
+| `GOOGLE_API_KEY` | Worker only | — | Single Gemini API key (fallback if `GOOGLE_API_KEYS` unset) |
+| `GOOGLE_API_KEYS` | No | — | Comma-separated pool of Gemini keys (GAP 15) — takes precedence over the singular var if set |
+| `GOOGLE_API_KEY_COOLDOWN_SECONDS` | No | `30` | How long a rate-limited key is skipped before the pool retries it |
+| `API_KEYS` | API | — | `key1:tenant1,key2:tenant2` — **this service's own tenant auth keys, unrelated to the Google keys above** |
 | `DATABASE_URL` | Yes | `sqlite:///./adversarial_code_review.db` | DB connection string |
 | `ADV_REVIEW_MODEL` | No | `gemini-2.5-flash` | LLM model name |
 | `USE_CONTAINERIZED_GATE` | No | `false` | Enable Docker sandbox |
 | `SANDBOX_IMAGE` | If containerized | `adv-review-sandbox:latest` | Sandbox Docker image |
+
+### Scale LLM throughput across multiple Google API keys (GAP 15)
+If debate throughput is bottlenecked on a single key's rate limit, set
+`GOOGLE_API_KEYS` to a comma-separated list instead of the singular
+`GOOGLE_API_KEY`:
+```bash
+echo "GOOGLE_API_KEYS=key-one,key-two,key-three" >> .env
+```
+`core/llm_client.py`'s `KeyPool` round-robins across them. What actually
+rotates: the Reviewer draws a fresh key every round (it's rebuilt fresh
+each round anyway); the Patcher draws one key per debate and only rotates
+mid-debate if that key hits a rate limit, since its session persists
+across rounds — see `llm_client.py`'s module docstring for the full
+reasoning on why this split is safe (every prompt is self-contained, so
+rebuilding on rotation loses no state the model needs). Which key index
+served each call is visible per-debate in `DebateSession`'s persisted
+cost breakdown (`calls_per_key`) — never the raw key.
+
+Ensure keys used this way come from **separate Google Cloud
+projects/billing accounts** — keys under the same project typically share
+one underlying quota, so pooling keys from a single project doesn't
+actually raise the ceiling.
 
 ### Scale workers
 Run additional worker processes — each polls the DB independently and claims

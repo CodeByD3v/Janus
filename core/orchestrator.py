@@ -19,6 +19,16 @@ Retrieval (GAP 8, GAP 14):
   (repo_context.py) both run fresh every round, since the code under
   review changes each round. They are two distinct sources rendered
   into two distinct prompt slots — see agents.py.
+
+Multi-key pooling (GAP 15):
+- Both agents are built with a model bound to one key from
+  core.llm_client's KeyPool instead of a single shared key. On a
+  rate-limit error, _ask() marks the exhausted key cooling-down and
+  rotates to a fresh key rather than backing off on the same one — see
+  _ask()'s docstring and llm_client.py's module docstring for exactly
+  what does and doesn't rotate (the Reviewer rotates every round; the
+  Patcher rotates within a debate on a 429, but starts each debate on
+  one key drawn from the pool).
 """
 
 from __future__ import annotations
@@ -32,7 +42,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
@@ -40,6 +50,7 @@ from google.genai import types as genai_types
 from core.agents import build_patcher, build_reviewer
 from core.config import settings
 from core.gate import run_full_gate, sandbox_copy
+from core.llm_client import get_key_pool, is_rate_limit_error
 from core.observability import CostTracker, LLMCallStats, get_logger, metrics
 from storage.db import get_session
 from storage.models import DebateSession, Round
@@ -160,13 +171,29 @@ async def _ask(
     text: str,
     cost_tracker: CostTracker | None = None,
     max_retries: int = 3,
-) -> str:
+    key_index: int | None = None,
+    rebuild_on_rate_limit: Callable[[], Awaitable[tuple[InMemoryRunner, str, int]]] | None = None,
+) -> tuple[str, InMemoryRunner, str, int | None]:
     """Send a message to an agent and collect its response.
 
     Includes:
     - Retry with exponential backoff (max_retries attempts)
     - Circuit breaker check before each attempt
     - Cost tracking for token/dollar aggregation
+    - Key rotation on rate-limit errors (GAP 15): if `key_index` and
+      `rebuild_on_rate_limit` are provided and a rate-limit error is
+      detected (see llm_client.is_rate_limit_error), the exhausted key
+      is marked cooling-down in the shared pool and a fresh
+      (runner, session_id, key_index) is drawn before the next attempt,
+      instead of backing off and retrying the same rate-limited key.
+      This is safe because every prompt in this system is self-contained
+      (ticket + current code are always resent in full) — rebuilding the
+      underlying agent/session mid-debate loses no state the model needs.
+
+    Returns (response_text, runner, session_id, key_index). The last
+    three may differ from what was passed in if a rotation happened —
+    callers MUST use the returned values for any subsequent call using
+    the same logical agent (e.g. the Patcher across rounds).
     """
     if not _circuit_breaker.allow_request():
         raise RuntimeError(
@@ -203,23 +230,37 @@ async def _ask(
                         output_tokens=output_tokens,
                         estimated_cost_usd=0.0,  # Would be calculated from model pricing
                         duration_seconds=duration,
+                        key_index=key_index,
                     )
                 )
 
-            return final_text
+            return final_text, runner, session_id, key_index
 
         except Exception as e:
             last_exception = e
             _circuit_breaker.record_failure()
             metrics.llm_retries.inc()
+
+            rotated = False
+            if key_index is not None and is_rate_limit_error(e):
+                get_key_pool().mark_rate_limited(key_index)
+                if rebuild_on_rate_limit is not None and attempt < max_retries:
+                    runner, session_id, key_index = await rebuild_on_rate_limit()
+                    rotated = True
+
             logger.warning(
                 "llm_call_retry",
                 attempt=attempt,
                 max_retries=max_retries,
                 error=str(e),
                 error_type=type(e).__name__,
+                rotated_key=rotated,
+                key_index=key_index,
             )
-            if attempt < max_retries:
+            if attempt < max_retries and not rotated:
+                # Only back off if we're retrying the SAME key — a fresh
+                # key from rotation has its own independent quota, so
+                # there's no reason to wait before trying it.
                 backoff = 2 ** (attempt - 1)  # 1s, 2s, 4s
                 await asyncio.sleep(backoff)
             if not _circuit_breaker.allow_request():
@@ -416,7 +457,7 @@ async def run_debate(
     target_path = sandbox / target_file
     current_code = target_path.read_text()
 
-    patcher_agent = build_patcher()
+    patcher_agent, patcher_key_index = build_patcher()
     patcher_runner = InMemoryRunner(agent=patcher_agent, app_name=settings.APP_NAME)
 
     user_id = "service_account"
@@ -424,6 +465,19 @@ async def run_debate(
     await patcher_runner.session_service.create_session(
         app_name=settings.APP_NAME, user_id=user_id, session_id=patcher_session
     )
+
+    async def _rebuild_patcher() -> tuple[InMemoryRunner, str, int]:
+        """Draw a fresh key from the pool and rebuild the Patcher agent,
+        runner, and session. Safe mid-debate because every prompt sent to
+        the Patcher already carries the full ticket + current code — no
+        state is lost by starting a fresh session bound to a new key."""
+        agent, idx = build_patcher()
+        r = InMemoryRunner(agent=agent, app_name=settings.APP_NAME)
+        sid = str(uuid.uuid4())
+        await r.session_service.create_session(
+            app_name=settings.APP_NAME, user_id=user_id, session_id=sid
+        )
+        return r, sid, idx
 
     result = DebateResult(merged=False, sandbox_path=str(sandbox))
 
@@ -435,12 +489,14 @@ async def run_debate(
     )
 
     try:
-        patch_text = await _ask(
+        patch_text, patcher_runner, patcher_session, patcher_key_index = await _ask(
             patcher_runner,
             patcher_session,
             user_id,
             patch_prompt,
             cost_tracker=cost_tracker,
+            key_index=patcher_key_index,
+            rebuild_on_rate_limit=_rebuild_patcher,
         )
     except RuntimeError as e:
         logger.error("debate_failed_initial_patch", debate_id=debate_id, error=str(e))
@@ -486,7 +542,7 @@ async def run_debate(
             )
             repo_context = {}
 
-        reviewer_agent = build_reviewer(
+        reviewer_agent, reviewer_key_index = build_reviewer(
             format_examples_for_prompt(examples),
             format_repo_context_for_prompt(repo_context),
         )
@@ -495,6 +551,23 @@ async def run_debate(
         await reviewer_runner.session_service.create_session(
             app_name=settings.APP_NAME, user_id=user_id, session_id=reviewer_session
         )
+
+        async def _rebuild_reviewer() -> tuple[InMemoryRunner, str, int]:
+            """Draw a fresh key and rebuild the Reviewer for this same
+            round, keeping this round's retrieved examples/repo context.
+            The Reviewer is rebuilt fresh every round anyway, so this is
+            genuinely lossless — nothing about this round's session has
+            accumulated yet at the point a rotation would happen."""
+            agent, idx = build_reviewer(
+                format_examples_for_prompt(examples),
+                format_repo_context_for_prompt(repo_context),
+            )
+            r = InMemoryRunner(agent=agent, app_name=settings.APP_NAME)
+            sid = str(uuid.uuid4())
+            await r.session_service.create_session(
+                app_name=settings.APP_NAME, user_id=user_id, session_id=sid
+            )
+            return r, sid, idx
 
         review_prompt = (
             f"Ticket:\n{ticket}\n\n"
@@ -508,12 +581,14 @@ async def run_debate(
         )
 
         try:
-            reviewer_text = await _ask(
+            reviewer_text, reviewer_runner, reviewer_session, reviewer_key_index = await _ask(
                 reviewer_runner,
                 reviewer_session,
                 user_id,
                 review_prompt,
                 cost_tracker=cost_tracker,
+                key_index=reviewer_key_index,
+                rebuild_on_rate_limit=_rebuild_reviewer,
             )
         except RuntimeError as e:
             logger.error(
@@ -584,12 +659,14 @@ async def run_debate(
         )
 
         try:
-            patch_text = await _ask(
+            patch_text, patcher_runner, patcher_session, patcher_key_index = await _ask(
                 patcher_runner,
                 patcher_session,
                 user_id,
                 fix_prompt,
                 cost_tracker=cost_tracker,
+                key_index=patcher_key_index,
+                rebuild_on_rate_limit=_rebuild_patcher,
             )
         except RuntimeError as e:
             logger.error(

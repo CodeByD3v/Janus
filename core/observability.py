@@ -19,15 +19,15 @@ from __future__ import annotations
 import json
 import logging
 import sys
-import time
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Structured JSON Logger
 # ---------------------------------------------------------------------------
+
 
 class StructuredFormatter(logging.Formatter):
     """Formats log records as single-line JSON objects for machine parsing."""
@@ -51,9 +51,7 @@ class StructuredFormatter(logging.Formatter):
 class StructuredLogger(logging.LoggerAdapter):
     """Logger adapter that accepts keyword arguments as structured fields."""
 
-    def process(
-        self, msg: str, kwargs: dict[str, Any]
-    ) -> tuple[str, dict[str, Any]]:
+    def process(self, msg: str, kwargs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         extra = kwargs.get("extra", {})
         # Pull out any non-standard kwargs and stuff them into extra._extra
         structured_extra: dict[str, Any] = {}
@@ -85,6 +83,7 @@ def get_logger(name: str) -> StructuredLogger:
 # ---------------------------------------------------------------------------
 # Metrics — lightweight counters and histograms
 # ---------------------------------------------------------------------------
+
 
 class Counter:
     """Thread-safe monotonic counter."""
@@ -177,14 +176,10 @@ class MetricsRegistry:
 
     # Debate lifecycle
     debates_started: Counter = field(
-        default_factory=lambda: Counter(
-            "acr_debates_started_total", "Total debates started"
-        )
+        default_factory=lambda: Counter("acr_debates_started_total", "Total debates started")
     )
     debates_completed: Counter = field(
-        default_factory=lambda: Counter(
-            "acr_debates_completed_total", "Total debates completed"
-        )
+        default_factory=lambda: Counter("acr_debates_completed_total", "Total debates completed")
     )
     debates_merged: Counter = field(
         default_factory=lambda: Counter(
@@ -199,14 +194,10 @@ class MetricsRegistry:
 
     # Rounds
     rounds_total: Counter = field(
-        default_factory=lambda: Counter(
-            "acr_rounds_total", "Total debate rounds executed"
-        )
+        default_factory=lambda: Counter("acr_rounds_total", "Total debate rounds executed")
     )
     rounds_per_debate: Histogram = field(
-        default_factory=lambda: Histogram(
-            "acr_rounds_per_debate", "Number of rounds per debate"
-        )
+        default_factory=lambda: Histogram("acr_rounds_per_debate", "Number of rounds per debate")
     )
 
     # Gate
@@ -220,9 +211,7 @@ class MetricsRegistry:
 
     # Retries / circuit breaker
     llm_retries: Counter = field(
-        default_factory=lambda: Counter(
-            "acr_llm_retries_total", "Total LLM call retry attempts"
-        )
+        default_factory=lambda: Counter("acr_llm_retries_total", "Total LLM call retry attempts")
     )
     circuit_breaker_opens: Counter = field(
         default_factory=lambda: Counter(
@@ -286,13 +275,18 @@ metrics = MetricsRegistry()
 # Cost tracking helper
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class LLMCallStats:
     """Stats for a single LLM call, for per-debate cost aggregation."""
+
     input_tokens: int = 0
     output_tokens: int = 0
     estimated_cost_usd: float = 0.0
     duration_seconds: float = 0.0
+    # Which pool key (by index, never the raw key — GAP 15) served this
+    # call, so usage/cost skew across keys is visible per debate.
+    key_index: int | None = None
 
 
 class CostTracker:
@@ -325,6 +319,24 @@ class CostTracker:
         with self._lock:
             return sum(c.estimated_cost_usd for c in self.calls)
 
+    @property
+    def calls_per_key(self) -> dict[str, dict[str, Any]]:
+        """Per-key-index breakdown: call count, tokens, cost. Keys are
+        stringified indices (or "unknown" if key_index wasn't set) so
+        this serializes cleanly to JSON."""
+        with self._lock:
+            breakdown: dict[str, dict[str, Any]] = {}
+            for c in self.calls:
+                label = str(c.key_index) if c.key_index is not None else "unknown"
+                entry = breakdown.setdefault(
+                    label, {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+                )
+                entry["calls"] += 1
+                entry["input_tokens"] += c.input_tokens
+                entry["output_tokens"] += c.output_tokens
+                entry["cost_usd"] += c.estimated_cost_usd
+            return breakdown
+
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -332,4 +344,5 @@ class CostTracker:
                 "total_input_tokens": self.total_input_tokens,
                 "total_output_tokens": self.total_output_tokens,
                 "total_cost_usd": round(self.total_cost_usd, 6),
+                "calls_per_key": self.calls_per_key,
             }

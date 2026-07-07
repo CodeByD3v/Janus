@@ -30,9 +30,21 @@ from sqlalchemy.orm import DeclarativeBase, relationship
 
 
 class Base(DeclarativeBase):
-    """Base class for all ORM models."""
+    """Base class for all ORM models.
 
-    pass
+    __allow_unmapped__ = True is SQLAlchemy's own documented escape hatch
+    for exactly this file's style: legacy `Column()` assignments paired
+    with plain type annotations (`str`, `Optional[str]`, `list[Round]`,
+    etc.) instead of the newer `Mapped[...]` generic wrapper. Without
+    this, SQLAlchemy 2.0's declarative scanner raises
+    `MappedAnnotationError` on the `relationship()` fields below, since
+    it expects `Mapped[]` to signal "this annotation is ORM-mapped."
+    Setting this here means every field in this file keeps its current
+    (legacy but valid) style rather than requiring every single
+    annotation across both models to be rewritten as Mapped[...].
+    """
+
+    __allow_unmapped__ = True
 
 
 class DebateSession(Base):
@@ -65,8 +77,18 @@ class DebateSession(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
-    rounds: list[Round] = relationship(  # type: ignore[assignment]
-        "Round", back_populates="session", order_by="Round.round_num"
+    # No type annotation here on purpose: with __allow_unmapped__ = True,
+    # a plain `list[Round]` annotation confuses SQLAlchemy's collection-
+    # type detection for relationship() specifically (it silently forces
+    # uselist=False even when uselist=True is passed explicitly) — this
+    # was hit and verified during testing, not a hypothetical. Leaving
+    # this unannotated and relying on `uselist=True` below is the
+    # reliable way to get a real one-to-many collection here.
+    rounds = relationship(  # type: ignore[assignment]
+        "Round",
+        back_populates="session",
+        order_by="Round.round_num",
+        uselist=True,
     )
 
     __table_args__ = (Index("ix_debate_sessions_status_created", "status", "created_at"),)
@@ -137,8 +159,10 @@ class Round(Base):
         default=lambda: datetime.now(timezone.utc),
     )
 
-    session: DebateSession = relationship(  # type: ignore[assignment]
-        "DebateSession", back_populates="rounds"
+    # See the matching note on DebateSession.rounds above — no annotation
+    # here on purpose.
+    session = relationship(  # type: ignore[assignment]
+        "DebateSession", back_populates="rounds", uselist=False
     )
 
     @property
