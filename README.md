@@ -1,7 +1,7 @@
 # Adversarial Code Review — Patcher vs. Reviewer Agents
 
 <div align="center">
-  <img src="Janus.jpg"/>
+  <img width="7168" height="2368" alt="Janus" src="https://github.com/user-attachments/assets/f51d9969-7707-456a-a8be-8d01c1618e51" />
 </div>
 
 A production service for adversarial code-review debates. A Patcher agent
