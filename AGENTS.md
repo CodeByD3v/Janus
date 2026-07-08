@@ -98,9 +98,12 @@ Each gate command executes inside a fresh Docker container with:
 The sandbox image (`docker/sandbox.Dockerfile`) contains ONLY Python, ruff,
 mypy, pytest, and bandit — no service code, no credentials.
 
-### Fallback
-When Docker is unavailable (dev/CI), `core/gate.py` falls back to direct
-subprocess execution with only the wall-clock timeout.
+### Fail-Secure & Direct Execution
+When `USE_CONTAINERIZED_GATE=false` (e.g. local dev/CI), `core/gate.py` uses direct subprocess execution with only the wall-clock timeout. 
+**Crucially**, if `USE_CONTAINERIZED_GATE=true` but Docker is unavailable or crashes, the system **fails securely (fail-closed)** and rejects the patch, rather than silently falling back to host execution and breaking the security boundary.
+
+### Standalone Package
+The containerized isolation engine is also exported as a standalone Python package (`janus-sandbox` located in `packages/janus-sandbox/`), completely decoupled from the application for use in other AI agent workflows.
 
 ---
 
@@ -349,6 +352,7 @@ docker compose up --scale worker=4
 4. Check `GET /healthz` — is the DB reachable? Is the sandbox image present?
 5. Check `GET /metrics` — look at `acr_circuit_breaker_opens_total` and
    `acr_llm_retries_total` for sustained API issues
+6. **Zombie Sessions:** If a worker crashes mid-debate (e.g., OOM kill), the debate may stay in `running` status indefinitely. A manual DB cleanup or cron sweeper is recommended for production.
 
 ---
 
@@ -370,7 +374,7 @@ These are non-negotiable constraints enforced in code:
    in code, config files, or logs.
 
 5. **Untrusted code runs in containers.** When `USE_CONTAINERIZED_GATE=true`,
-   all gate commands run in network-isolated, resource-capped containers.
+   all gate commands run in network-isolated, resource-capped containers. If Docker is unavailable, the gate fails securely (fail-closed) rather than silently degrading to host execution.
 
 6. **Every round is persisted immediately.** If a worker crashes mid-debate,
    all completed rounds are recoverable from the database.
