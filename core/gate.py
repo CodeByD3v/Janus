@@ -109,16 +109,16 @@ def _run_containerized(
     except subprocess.TimeoutExpired:
         return 1, f"TIMEOUT after {effective_timeout}s running containerized: {' '.join(cmd)}"
     except FileNotFoundError:
-        logger.warning(
-            "docker_not_found",
-            detail="Docker binary not found, falling back to direct execution",
-        )
-        return _run_direct(cmd, repo_dir, timeout=effective_timeout)
+        logger.error("docker_binary_not_found_but_containerized_gate_enabled")
+        return 1, "GATE ERROR: Docker is required but not found. Failing securely."
 
 
 def _run(cmd: list[str], cwd: Path, timeout: int = 60) -> tuple[int, str]:
     """Execute a gate command, using containerized execution if configured."""
-    if settings.USE_CONTAINERIZED_GATE and _is_docker_available():
+    if settings.USE_CONTAINERIZED_GATE:
+        if not _is_docker_available():
+            logger.error("docker_unavailable_but_containerized_gate_enabled")
+            return 1, "GATE ERROR: Docker is required but unavailable. Failing securely."
         return _run_containerized(cmd, cwd, timeout)
     return _run_direct(cmd, cwd, timeout)
 
