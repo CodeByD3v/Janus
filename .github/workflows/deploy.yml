@@ -71,41 +71,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  migrate:
-    runs-on: ubuntu-latest
-    needs: build-and-push
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run database migrations
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          GOOGLE_API_KEY: "unused-for-migrations"
-        run: python -c "from storage.db import run_migrations; run_migrations()"
-
-  # GAP 16 / TASK 17: previously this pipeline stopped at "images pushed,
-  # DB migrated" — nothing actually rolled the new images out anywhere.
-  # This job SSHes into a single deploy host and rolls out via
-  # docker-compose.prod.yml, which is the simplest option that matches the
-  # worker's Docker-socket dependency (see gate.py's container isolation
-  # and docker-compose.prod.yml's comments on the worker service). See
-  # README.md's "Production Deployment" section for required secrets,
-  # one-time host setup, and why a Kubernetes target would need a
-  # privileged-pod tradeoff this simpler path avoids.
   deploy:
     runs-on: ubuntu-latest
-    needs: [build-and-push, migrate]
+    needs: build-and-push
     if: github.ref == 'refs/heads/main'
 
     steps:
@@ -140,6 +108,11 @@ jobs:
             # older commit.
             docker pull "${REGISTRY}/${IMAGE_PREFIX}/sandbox:${IMAGE_TAG}"
             docker compose -f docker-compose.prod.yml pull
+            
+            # Run database migrations using the newly pulled service image
+            # 'docker compose run' respects depends_on, so it waits for db to be healthy.
+            docker compose -f docker-compose.prod.yml run --rm api python -c "from storage.db import run_migrations; run_migrations()"
+            
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
       - name: Verify the new deployment is actually healthy
