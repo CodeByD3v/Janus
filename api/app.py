@@ -46,6 +46,17 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Enable CORS for internal dashboards and web interfaces
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust this in production if a specific frontend is used
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # ---------------------------------------------------------------------------
 # Startup / shutdown
@@ -71,7 +82,7 @@ async def startup() -> None:
     status_code=202,
     responses={401: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
 )
-async def create_debate(
+def create_debate(
     body: CreateDebateRequest,
     tenant_id: str = Depends(require_api_key),
 ) -> CreateDebateResponse:
@@ -120,7 +131,7 @@ async def create_debate(
         429: {"model": ErrorResponse},
     },
 )
-async def get_debate(
+def get_debate(
     debate_id: str,
     tenant_id: str = Depends(require_api_key),
 ) -> DebateResponse:
@@ -170,7 +181,7 @@ async def get_debate(
 
 
 @app.get("/healthz", response_model=HealthResponse)
-async def healthz() -> HealthResponse:
+def healthz() -> HealthResponse:
     """Liveness and readiness check.
 
     Checks:
@@ -215,7 +226,7 @@ async def healthz() -> HealthResponse:
 
 
 @app.get("/metrics")
-async def metrics_endpoint() -> Response:
+def metrics_endpoint() -> Response:
     """Prometheus-compatible metrics endpoint."""
     return Response(
         content=metrics.prometheus_text(),

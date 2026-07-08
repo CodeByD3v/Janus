@@ -84,6 +84,13 @@ class CreateDebateRequest(BaseModel):
             raise ValueError("webhook_url must start with http:// or https://")
         return v
 
+    @field_validator("target_file")
+    @classmethod
+    def _validate_target_file(cls, v: str) -> str:
+        if ".." in v or v.startswith("/") or v.startswith("\\"):
+            raise ValueError("target_file must be a safe relative path without parent traversals")
+        return v
+
     @model_validator(mode="after")
     def _pr_repo_and_number_together(self) -> "CreateDebateRequest":
         if (self.pr_repo is None) != (self.pr_number is None):
