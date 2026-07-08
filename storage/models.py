@@ -65,6 +65,13 @@ class DebateSession(Base):
     cost_json: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
     error_message: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
     sandbox_path: Optional[str] = Column(String(512), nullable=True)  # type: ignore[assignment]
+    # GAP 17 / TASK 18 — optional, all independent of each other and of
+    # everything else here. A session with none of these set behaves
+    # exactly as it did before this feature existed (see notifications.py).
+    pr_repo: Optional[str] = Column(String(256), nullable=True)  # type: ignore[assignment]
+    pr_number: Optional[int] = Column(Integer, nullable=True)  # type: ignore[assignment]
+    commit_sha: Optional[str] = Column(String(64), nullable=True)  # type: ignore[assignment]
+    webhook_url: Optional[str] = Column(String(2048), nullable=True)  # type: ignore[assignment]
     created_at: datetime = Column(  # type: ignore[assignment]
         DateTime(timezone=True),
         nullable=False,
@@ -125,6 +132,10 @@ class DebateSession(Base):
             "final_gate": self.final_gate,
             "cost": self.cost,
             "error_message": self.error_message,
+            "pr_repo": self.pr_repo,
+            "pr_number": self.pr_number,
+            "commit_sha": self.commit_sha,
+            "webhook_url": self.webhook_url,
             "rounds": [r.to_dict() for r in self.rounds],
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

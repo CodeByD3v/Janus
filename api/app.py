@@ -51,6 +51,7 @@ app = FastAPI(
 # Startup / shutdown
 # ---------------------------------------------------------------------------
 
+
 @app.on_event("startup")
 async def startup() -> None:
     """Initialize DB and load API keys on startup."""
@@ -62,6 +63,7 @@ async def startup() -> None:
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.post(
     "/debates",
@@ -88,6 +90,10 @@ async def create_debate(
             ticket=body.ticket,
             status="queued",
             tenant_id=tenant_id,
+            pr_repo=body.pr_repo,
+            pr_number=body.pr_number,
+            commit_sha=body.commit_sha,
+            webhook_url=body.webhook_url,
         )
         db.add(session)
 
@@ -97,6 +103,9 @@ async def create_debate(
         tenant_id=tenant_id,
         repo_ref=body.repo_ref,
         target_file=body.target_file,
+        pr_repo=body.pr_repo,
+        pr_number=body.pr_number,
+        has_webhook=bool(body.webhook_url),
     )
 
     return CreateDebateResponse(debate_id=debate_id, status="queued")
@@ -117,11 +126,7 @@ async def get_debate(
 ) -> DebateResponse:
     """Get the current state of a debate, including rounds and gate results."""
     with get_session() as db:
-        session = (
-            db.query(DebateSession)
-            .filter_by(id=debate_id)
-            .first()
-        )
+        session = db.query(DebateSession).filter_by(id=debate_id).first()
         if session is None:
             raise HTTPException(status_code=404, detail="Debate not found")
 
@@ -140,6 +145,10 @@ async def get_debate(
             final_gate=session.final_gate,
             cost=session.cost,
             error_message=session.error_message,
+            pr_repo=session.pr_repo,
+            pr_number=session.pr_number,
+            commit_sha=session.commit_sha,
+            webhook_url=session.webhook_url,
             rounds=[
                 RoundResponse(
                     round_num=r.round_num,
@@ -147,21 +156,16 @@ async def get_debate(
                     reviewer_text=r.reviewer_text,
                     gate_result=r.gate_result,
                     retrieved_example_ids=r.retrieved_example_ids,
+                    repo_context_signals=r.repo_context_signals,
                     stop_reason=r.stop_reason,
                     code_extraction_failed=r.code_extraction_failed,
                     reviewer_skipped_counterexample=r.reviewer_skipped_counterexample,
-                    created_at=(
-                        r.created_at.isoformat() if r.created_at else None
-                    ),
+                    created_at=(r.created_at.isoformat() if r.created_at else None),
                 )
                 for r in session.rounds
             ],
-            created_at=(
-                session.created_at.isoformat() if session.created_at else None
-            ),
-            updated_at=(
-                session.updated_at.isoformat() if session.updated_at else None
-            ),
+            created_at=(session.created_at.isoformat() if session.created_at else None),
+            updated_at=(session.updated_at.isoformat() if session.updated_at else None),
         )
 
 
@@ -177,9 +181,7 @@ async def healthz() -> HealthResponse:
     db_detail = ""
     try:
         with get_session() as db:
-            db.execute(
-                __import__("sqlalchemy").text("SELECT 1")
-            )
+            db.execute(__import__("sqlalchemy").text("SELECT 1"))
             db_ok = True
     except Exception as e:
         db_detail = str(e)

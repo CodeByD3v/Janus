@@ -118,11 +118,7 @@ class Worker:
         async with self._semaphore:
             # Load session details from DB
             with get_session() as db:
-                session = (
-                    db.query(DebateSession)
-                    .filter_by(id=session_id)
-                    .first()
-                )
+                session = db.query(DebateSession).filter_by(id=session_id).first()
                 if session is None:
                     logger.error("debate_session_not_found", debate_id=session_id)
                     return
@@ -131,6 +127,9 @@ class Worker:
                 target_file = session.target_file
                 ticket = session.ticket
                 tenant_id = session.tenant_id
+                pr_repo = session.pr_repo
+                pr_number = session.pr_number
+                webhook_url = session.webhook_url
 
             logger.info(
                 "debate_running",
@@ -159,6 +158,25 @@ class Worker:
                     rounds=len(result.rounds),
                 )
 
+                # GAP 17 / TASK 18: optional side effects, fired only if a
+                # PR reference and/or webhook was set on this session — a
+                # no-op otherwise. Failures here are logged and swallowed
+                # inside notify_debate_outcome(); they must never affect
+                # the already-completed, already-persisted debate result.
+                from dataclasses import asdict
+
+                from core.notifications import notify_debate_outcome
+
+                notify_debate_outcome(
+                    debate_id=session_id,
+                    merged=result.merged,
+                    rounds=[asdict(r) for r in result.rounds],
+                    final_gate=result.final_gate,
+                    pr_repo=pr_repo,
+                    pr_number=pr_number,
+                    webhook_url=webhook_url,
+                )
+
             except Exception as e:
                 logger.error(
                     "debate_failed",
@@ -168,11 +186,7 @@ class Worker:
                 )
                 # Mark session as errored
                 with get_session() as db:
-                    session = (
-                        db.query(DebateSession)
-                        .filter_by(id=session_id)
-                        .first()
-                    )
+                    session = db.query(DebateSession).filter_by(id=session_id).first()
                     if session:
                         session.status = "error"  # type: ignore[assignment]
                         session.error_message = str(e)  # type: ignore[assignment]
