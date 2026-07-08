@@ -454,8 +454,26 @@ async def run_debate(
     _persist_session_start(debate_id, repo_dir, target_file, ticket, tenant_id)
 
     sandbox = sandbox_copy(repo_dir)
-    target_path = sandbox / target_file
-    current_code = target_path.read_text()
+    sandbox_resolved = sandbox.resolve()
+    target_path = (sandbox_resolved / target_file).resolve()
+    
+    if not target_path.is_relative_to(sandbox_resolved):
+        error_msg = f"Path traversal denied: {target_file} is outside the sandbox"
+        logger.error("debate_failed_path_traversal", debate_id=debate_id, error=error_msg)
+        _persist_session_end(debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), error_msg)
+        import shutil
+        shutil.rmtree(sandbox, ignore_errors=True)
+        return DebateResult(merged=False, sandbox_path=str(sandbox))
+        
+    try:
+        current_code = target_path.read_text()
+    except Exception as e:
+        error_msg = f"Failed to read target file: {e}"
+        logger.error("debate_failed_read_target", debate_id=debate_id, error=error_msg)
+        _persist_session_end(debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), error_msg)
+        import shutil
+        shutil.rmtree(sandbox, ignore_errors=True)
+        return DebateResult(merged=False, sandbox_path=str(sandbox))
 
     patcher_agent, patcher_key_index = build_patcher()
     patcher_runner = InMemoryRunner(agent=patcher_agent, app_name=settings.APP_NAME)
@@ -501,6 +519,8 @@ async def run_debate(
     except RuntimeError as e:
         logger.error("debate_failed_initial_patch", debate_id=debate_id, error=str(e))
         _persist_session_end(debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), str(e))
+        import shutil
+        shutil.rmtree(sandbox, ignore_errors=True)
         return result
 
     current_code, extraction_failed = _extract_code(patch_text, current_code)
@@ -710,6 +730,9 @@ async def run_debate(
         rounds=len(result.rounds),
         cost=cost_tracker.to_dict(),
     )
+
+    import shutil
+    shutil.rmtree(sandbox, ignore_errors=True)
 
     return result
 

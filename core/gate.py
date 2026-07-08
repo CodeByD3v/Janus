@@ -185,7 +185,12 @@ def write_candidate_test(repo_dir: str, filename: str, content: str) -> dict:
     """Let the Reviewer materialize an executable counterexample as a real
     test file in the sandbox, so a critique becomes a concrete pass/fail
     signal instead of prose."""
-    target = Path(repo_dir) / "tests" / filename
+    repo_path = Path(repo_dir).resolve()
+    target = (repo_path / "tests" / filename).resolve()
+    
+    if not target.is_relative_to(repo_path):
+        return {"error": "Path traversal denied: target must be inside the sandbox"}
+
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content)
     logger.info("candidate_test_written", target=str(target))
