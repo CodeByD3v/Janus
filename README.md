@@ -1,7 +1,7 @@
 # Adversarial Code Review — Patcher vs. Reviewer Agents
 
 <div align="center">
-  <img width="7168" height="2368" alt="Janus" src="https://github.com/user-attachments/assets/f51d9969-7707-456a-a8be-8d01c1618e51" />
+    <img alt="Janus" src="https://github.com/user-attachments/assets/925849f9-1ab4-4a39-be99-0c264601a5ba" />
 </div>
 
 A production service for adversarial code-review debates. A Patcher agent
@@ -79,10 +79,10 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 │
 ├── Dockerfile                         Service image (API + worker)
 ├── docker/sandbox.Dockerfile          Locked-down gate-execution image
-├── docker-compose.yml                 Local dev stack (API, worker, Postgres)
-├── .github/workflows/                 CI (lint/type/evals) and deploy (build/push/migrate)
-├── AGENTS.md                          Full operational reference
-└── WRITEUP_DRAFT.md                   Design rationale (reference)
+├── docker-compose.yml                 Local dev stack (builds from source)
+├── docker-compose.prod.yml            Production stack (pulls CI-built images, GAP 16)
+├── .github/workflows/                 CI (lint/type/evals) and deploy (build/push/migrate/roll out)
+└── AGENTS.md                          Full operational reference
 ```
 
 ---
@@ -100,7 +100,7 @@ Runs lint/type/test/security checks against `demo_repo/`. On the unmodified
 demo repo this **passes** despite two real bugs — the existing test suite is
 deliberately weak. That gap is exactly what the Reviewer agent closes.
 
-### Deploy the full stack
+### Local development (builds images from source)
 
 ```bash
 # 1. Set secrets
@@ -113,6 +113,10 @@ docker compose --profile build build sandbox-builder
 # 3. Start API + worker + Postgres
 docker compose up --build
 ```
+
+This builds from source every time — fine for local dev, not what production
+deploys run. See **Production Deployment** below for the CI-built,
+CI-tested path.
 
 ### Seed the retrieval store
 
@@ -200,7 +204,75 @@ curl http://localhost:8000/metrics
 
 ---
 
-## Running the Eval Suite
+## Production Deployment
+
+`.github/workflows/deploy.yml` builds and pushes both images, runs DB
+migrations, then **actually rolls the new images out** — it doesn't stop at
+"pushed to a registry" (GAP 16).
+
+### Chosen target: a single VM via SSH + docker-compose, not Kubernetes
+
+The worker mounts the Docker socket to spawn sandbox containers for the gate
+(`gate.py`'s container isolation — see `docker-compose.prod.yml`'s `worker`
+service). That one dependency shapes the whole deployment decision:
+
+- **Serverless platforms are out.** Cloud Run and Fargate (without
+  privileged mode) don't allow a container to spawn sibling containers —
+  the gate's per-check isolation model doesn't fit that execution model at
+  all, not just awkwardly.
+- **Kubernetes is possible, but not free.** Running the worker as a pod that
+  can spawn sandbox containers means either a Docker-in-Docker sidecar or
+  mounting the host's Docker socket into the pod — both require the pod to
+  run **privileged**, which most managed clusters (GKE Autopilot, EKS with
+  Pod Security Standards enforced, etc.) restrict or block outright for
+  good reasons. If you go this route, budget for a dedicated node pool with
+  relaxed pod security policy for worker pods specifically, and treat that
+  node pool as a smaller trust boundary than the rest of the cluster.
+- **A plain VM avoids the tradeoff entirely** — the whole point of choosing
+  it here. `docker-compose.prod.yml` mirrors `docker-compose.yml`'s
+  topology but pulls pre-built, pre-tested images from the registry instead
+  of building from source on the deploy host.
+
+If your priorities differ — you're already running Kubernetes for
+everything else, or you need the deploy host itself to be untrusted — the
+Kubernetes path is real and buildable, it's just a genuinely different
+security posture than what's implemented here, not a drop-in swap.
+
+### Required GitHub secrets
+
+| Secret | Required | Description |
+|---|---|---|
+| `DEPLOY_HOST` | Yes | Deploy target's hostname/IP |
+| `DEPLOY_USER` | Yes | SSH user on the deploy host |
+| `DEPLOY_SSH_KEY` | Yes | Private key for that user (add the public half to the host's `authorized_keys`) |
+| `DEPLOY_PATH` | Yes | Directory on the host where `docker-compose.prod.yml` lives and `.env` is managed |
+| `DEPLOY_PORT` | No | SSH port, defaults to `22` |
+| `DATABASE_URL` | Yes | Used by the `migrate` job — same Postgres the deployed stack connects to |
+| `DOCKER_REGISTRY` | No | Defaults to `ghcr.io` |
+| `DOCKER_IMAGE_PREFIX` | No | Defaults to the GitHub repo name |
+| `DOCKER_USERNAME` / `DOCKER_PASSWORD` | No | Defaults to `github.actor` / `GITHUB_TOKEN`, fine for GHCR |
+
+### One-time deploy host setup
+
+```bash
+# On the deploy host:
+mkdir -p /opt/janus && cd /opt/janus
+# Real secrets live here, managed directly on the host — the deploy
+# pipeline never writes secrets to disk itself, only pulls images and
+# restarts containers.
+cat > .env <<'EOF'
+GOOGLE_API_KEYS=key-one,key-two
+API_KEYS=your-api-key:your-tenant-id
+EOF
+```
+Point `DEPLOY_PATH` at `/opt/janus` (or wherever you chose). After that,
+every push to `main` builds, pushes, migrates, and rolls out automatically
+— `deploy.yml`'s last step polls `/healthz` and fails the job loudly if the
+new containers don't come up healthy within 50 seconds, rather than
+silently leaving a broken deploy running.
+
+---
+
 
 ```bash
 # Pure-logic tests (no API key, no Docker needed)

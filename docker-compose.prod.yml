@@ -1,0 +1,96 @@
+# docker-compose.prod.yml
+#
+# Pulls pre-built images from the registry that .github/workflows/deploy.yml
+# just pushed, rather than building from source on the deploy host.
+#
+# This is a DELIBERATELY SEPARATE file from docker-compose.yml (local dev,
+# builds from source via `--build`). Mixing `build:` and `image:` in one
+# file invites accidentally deploying a locally-built image instead of the
+# CI-built, CI-tested one that was actually pushed — keeping them apart
+# makes that mistake structurally harder to make.
+#
+# Usage (this is what deploy.yml's `deploy` job runs automatically on every
+# push to main — see README.md's "Production Deployment" section for the
+# required secrets and one-time host setup):
+#
+#   export REGISTRY=ghcr.io IMAGE_PREFIX=you/janus IMAGE_TAG=<git-sha>
+#   docker pull "${REGISTRY}/${IMAGE_PREFIX}/sandbox:${IMAGE_TAG}"
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d --remove-orphans
+#
+# Requires a .env file already present on the deploy host with real secrets
+# (GOOGLE_API_KEY or GOOGLE_API_KEYS, API_KEYS, and anything else in
+# README.md's Environment Variables table). That file is managed on the
+# host directly, out of band from CI — the deploy pipeline never writes
+# secrets to disk on the host.
+
+services:
+  # ── API server ──────────────────────────────────────────────
+  api:
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_PREFIX}/service:${IMAGE_TAG:-latest}"
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: "postgresql+psycopg2://janus:janus@db:5432/janus"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      GOOGLE_API_KEYS: "${GOOGLE_API_KEYS:-}"
+      API_KEYS: "${API_KEYS}"
+      USE_CONTAINERIZED_GATE: "true"
+      SANDBOX_IMAGE: "${REGISTRY:-ghcr.io}/${IMAGE_PREFIX}/sandbox:${IMAGE_TAG:-latest}"
+      CHROMA_PERSIST_DIR: "/app/chroma_store"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    volumes:
+      - chroma_store:/app/chroma_store
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Background worker ──────────────────────────────────────
+  # Same service image as api — only the command differs. Mounts the
+  # Docker socket to spawn sandbox containers for the gate (see gate.py's
+  # container isolation, GAP 1). This mount is exactly why this stack
+  # targets a plain VM instead of a serverless platform — see README.md's
+  # "Production Deployment" section for the full reasoning and the
+  # Kubernetes alternative's tradeoff.
+  worker:
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_PREFIX}/service:${IMAGE_TAG:-latest}"
+    command: ["python", "-m", "core.worker"]
+    environment:
+      DATABASE_URL: "postgresql+psycopg2://janus:janus@db:5432/janus"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      GOOGLE_API_KEYS: "${GOOGLE_API_KEYS:-}"
+      USE_CONTAINERIZED_GATE: "true"
+      SANDBOX_IMAGE: "${REGISTRY:-ghcr.io}/${IMAGE_PREFIX}/sandbox:${IMAGE_TAG:-latest}"
+      CHROMA_PERSIST_DIR: "/app/chroma_store"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    volumes:
+      - chroma_store:/app/chroma_store
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── PostgreSQL ─────────────────────────────────────────────
+  # No public port mapping in production, unlike docker-compose.yml's dev
+  # config — Postgres stays reachable only from the api/worker containers
+  # on the compose network, not from the host's public interface.
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: janus
+      POSTGRES_PASSWORD: janus
+      POSTGRES_DB: janus
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U janus"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  chroma_store:

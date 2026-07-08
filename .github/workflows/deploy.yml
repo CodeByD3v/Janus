@@ -93,3 +93,70 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GOOGLE_API_KEY: "unused-for-migrations"
         run: python -c "from storage.db import run_migrations; run_migrations()"
+
+  # GAP 16 / TASK 17: previously this pipeline stopped at "images pushed,
+  # DB migrated" — nothing actually rolled the new images out anywhere.
+  # This job SSHes into a single deploy host and rolls out via
+  # docker-compose.prod.yml, which is the simplest option that matches the
+  # worker's Docker-socket dependency (see gate.py's container isolation
+  # and docker-compose.prod.yml's comments on the worker service). See
+  # README.md's "Production Deployment" section for required secrets,
+  # one-time host setup, and why a Kubernetes target would need a
+  # privileged-pod tradeoff this simpler path avoids.
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build-and-push, migrate]
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy docker-compose.prod.yml to the deploy host
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: "docker-compose.prod.yml"
+          target: ${{ secrets.DEPLOY_PATH }}
+
+      - name: Pull and roll out the new images
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_PATH }}"
+            export REGISTRY="${{ env.REGISTRY }}"
+            export IMAGE_PREFIX="${{ env.IMAGE_PREFIX }}"
+            export IMAGE_TAG="${{ github.sha }}"
+            # Deploy this exact commit's images, not a floating "latest" —
+            # traceable, and rollback is just re-running this job at an
+            # older commit.
+            docker pull "${REGISTRY}/${IMAGE_PREFIX}/sandbox:${IMAGE_TAG}"
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+      - name: Verify the new deployment is actually healthy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            for i in $(seq 1 10); do
+              if curl -fsS http://localhost:8000/healthz; then
+                echo "Deployment healthy."
+                exit 0
+              fi
+              echo "Not healthy yet (attempt $i/10) — waiting..."
+              sleep 5
+            done
+            echo "Service did not become healthy after rollout — failing the deploy."
+            exit 1
