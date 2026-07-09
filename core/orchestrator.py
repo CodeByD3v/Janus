@@ -436,9 +436,6 @@ async def run_debate(
     Safe to call concurrently — each debate gets its own sandbox,
     agent instances, and DB records.
     """
-    # Lazy import to avoid circular dependency at module load time
-    from core.repo_context import format_repo_context_for_prompt, retrieve_repo_context
-    from core.retrieval import format_examples_for_prompt, retrieve_examples
 
     debate_id = debate_id or str(uuid.uuid4())
     cost_tracker = CostTracker()
@@ -469,7 +466,29 @@ async def run_debate(
     # Persist session start
     _persist_session_start(debate_id, repo_dir, target_file, ticket, tenant_id)
 
+
     sandbox = sandbox_copy(repo_dir)
+    try:
+        return await _run_debate_inner(
+            repo_dir, target_file, ticket, debate_id, tenant_id, sandbox, cost_tracker
+        )
+    finally:
+        import shutil
+        shutil.rmtree(sandbox, ignore_errors=True)
+
+async def _run_debate_inner(
+    repo_dir: str,
+    target_file: str,
+    ticket: str,
+    debate_id: str,
+    tenant_id: str | None,
+    sandbox: Path,
+    cost_tracker: CostTracker,
+) -> DebateResult:
+    # Lazy import to avoid circular dependency at module load time
+    from core.repo_context import format_repo_context_for_prompt, retrieve_repo_context
+    from core.retrieval import format_examples_for_prompt, retrieve_examples
+
     sandbox_resolved = sandbox.resolve()
     target_path = (sandbox_resolved / target_file).resolve()
 
@@ -477,8 +496,6 @@ async def run_debate(
         error_msg = f"Path traversal denied: {target_file} is outside the sandbox"
         logger.error("debate_failed_path_traversal", debate_id=debate_id, error=error_msg)
         _persist_session_end(debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), error_msg)
-        import shutil
-        shutil.rmtree(sandbox, ignore_errors=True)
         return DebateResult(merged=False, sandbox_path=str(sandbox))
 
     try:
@@ -487,8 +504,6 @@ async def run_debate(
         error_msg = f"Failed to read target file: {e}"
         logger.error("debate_failed_read_target", debate_id=debate_id, error=error_msg)
         _persist_session_end(debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), error_msg)
-        import shutil
-        shutil.rmtree(sandbox, ignore_errors=True)
         return DebateResult(merged=False, sandbox_path=str(sandbox))
 
     patcher_agent, patcher_key_index = build_patcher()
@@ -535,8 +550,6 @@ async def run_debate(
     except RuntimeError as e:
         logger.error("debate_failed_initial_patch", debate_id=debate_id, error=str(e))
         _persist_session_end(debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), str(e))
-        import shutil
-        shutil.rmtree(sandbox, ignore_errors=True)
         return result
 
     current_code, extraction_failed = _extract_code(patch_text, current_code)
@@ -746,9 +759,6 @@ async def run_debate(
         rounds=len(result.rounds),
         cost=cost_tracker.to_dict(),
     )
-
-    import shutil
-    shutil.rmtree(sandbox, ignore_errors=True)
 
     return result
 
