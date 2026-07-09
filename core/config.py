@@ -144,6 +144,22 @@ class Settings:
     RATE_LIMIT_WINDOW_SECONDS: int = field(
         default_factory=lambda: _optional_int("RATE_LIMIT_WINDOW_SECONDS", 60)
     )
+    # Comma-separated list of directories `repo_ref` is allowed to resolve
+    # under. FAIL-CLOSED by design: empty means no repo_ref is accepted at
+    # all, forcing an operator to explicitly opt in per deployment rather
+    # than silently allowing arbitrary filesystem paths (see
+    # api/schemas.py's repo_ref validator and core/path_safety.py).
+    ALLOWED_REPO_ROOTS: str = field(
+        default_factory=lambda: _optional("ALLOWED_REPO_ROOTS", "")
+    )
+    # Comma-separated allowed CORS origins, or "*" for any origin. Empty
+    # disables CORS entirely (no cross-origin browser access). "*" is safe
+    # here specifically because auth is header-based (X-API-Key), not
+    # cookies — allow_credentials is always False, so there is nothing for
+    # a malicious origin to ride on even with a wildcard.
+    CORS_ALLOWED_ORIGINS: str = field(
+        default_factory=lambda: _optional("CORS_ALLOWED_ORIGINS", "")
+    )
 
     # --- Worker ---
     WORKER_POLL_INTERVAL: int = field(
@@ -161,6 +177,27 @@ class Settings:
         )
     )
 
+    # --- Notifications (GAP 17) ---
+    # All optional — a debate with no PR reference and no webhook configured
+    # (neither globally here nor per-request) behaves exactly as it did
+    # before this feature existed. See core/notifications.py.
+    #
+    # NOTE: these were missing from this file even though
+    # core/notifications.py already depended on all four — any call to
+    # post_github_pr_comment() or post_webhook() would have raised
+    # AttributeError. Found and fixed while auditing this checkout.
+    GITHUB_TOKEN: str = field(default_factory=lambda: _optional("GITHUB_TOKEN", ""))
+    GITHUB_API_URL: str = field(
+        default_factory=lambda: _optional("GITHUB_API_URL", "https://api.github.com")
+    )
+    # Fallback used only when a request doesn't set its own webhook_url.
+    DEFAULT_WEBHOOK_URL: str = field(
+        default_factory=lambda: _optional("DEFAULT_WEBHOOK_URL", "")
+    )
+    NOTIFICATION_TIMEOUT_SECONDS: int = field(
+        default_factory=lambda: _optional_int("NOTIFICATION_TIMEOUT_SECONDS", 10)
+    )
+
     # --- MCP Server ---
     MCP_SERVER_SCRIPT: str = field(
         default_factory=lambda: _optional(
@@ -168,6 +205,21 @@ class Settings:
             str(os.path.join(os.path.dirname(__file__), "mcp_server", "server.py")),
         )
     )
+
+    def allowed_repo_roots(self) -> list[str]:
+        """Resolved list of directories repo_ref may live under. Empty
+        list means fail-closed — no repo_ref is accepted until an
+        operator explicitly configures this."""
+        if not self.ALLOWED_REPO_ROOTS:
+            return []
+        return [r.strip() for r in self.ALLOWED_REPO_ROOTS.split(",") if r.strip()]
+
+    def cors_origins(self) -> list[str]:
+        """Resolved list of allowed CORS origins. Empty list means CORS
+        is not enabled at all."""
+        if not self.CORS_ALLOWED_ORIGINS:
+            return []
+        return [o.strip() for o in self.CORS_ALLOWED_ORIGINS.split(",") if o.strip()]
 
     def google_api_keys(self) -> list[str]:
         """Resolved list of keys for the KeyPool.

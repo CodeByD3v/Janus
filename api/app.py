@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 from api.auth import key_store, require_api_key
 from api.schemas import (
@@ -46,16 +47,19 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Enable CORS for internal dashboards and web interfaces
-from fastapi.middleware.cors import CORSMiddleware
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Adjust this in production if a specific frontend is used
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS: opt-in via CORS_ALLOWED_ORIGINS, disabled by default. Safe to set
+# to "*" specifically because auth here is header-based (X-API-Key), never
+# cookies — allow_credentials is always False, so a wildcard origin has
+# nothing to ride on. See core/config.py's CORS_ALLOWED_ORIGINS docstring.
+_cors_origins = settings.cors_origins()
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["X-API-Key", "Content-Type"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +94,14 @@ def create_debate(
 
     Returns immediately with a debate_id and 'queued' status.
     The debate runs asynchronously via the worker process.
+
+    Defined as `def`, not `async def`, on purpose: get_session() is a
+    synchronous SQLAlchemy session (psycopg2-binary has no async driver
+    in requirements.txt). A blocking DB call inside an `async def`
+    endpoint runs directly on FastAPI's single event loop thread and
+    stalls every other in-flight request for its duration. A plain `def`
+    endpoint is automatically dispatched to Starlette's threadpool
+    instead, so a slow query here can never freeze the whole server.
     """
     debate_id = str(uuid.uuid4())
 
@@ -135,7 +147,10 @@ def get_debate(
     debate_id: str,
     tenant_id: str = Depends(require_api_key),
 ) -> DebateResponse:
-    """Get the current state of a debate, including rounds and gate results."""
+    """Get the current state of a debate, including rounds and gate results.
+
+    Also `def`, not `async def` — same reasoning as create_debate above.
+    """
     with get_session() as db:
         session = db.query(DebateSession).filter_by(id=debate_id).first()
         if session is None:
@@ -187,6 +202,12 @@ def healthz() -> HealthResponse:
     Checks:
     - Database is reachable
     - Sandbox container image is present (if containerized gate is enabled)
+
+    Also `def`, not `async def` — this one blocks on BOTH a DB round-trip
+    and a `docker image inspect` subprocess call (up to a 5s timeout). As
+    an `async def`, a slow Docker daemon would stall the entire API for
+    up to 5 seconds on every single health check — exactly the failure
+    mode a liveness probe exists to catch, not cause.
     """
     db_ok = False
     db_detail = ""
@@ -226,7 +247,7 @@ def healthz() -> HealthResponse:
 
 
 @app.get("/metrics")
-def metrics_endpoint() -> Response:
+async def metrics_endpoint() -> Response:
     """Prometheus-compatible metrics endpoint."""
     return Response(
         content=metrics.prometheus_text(),

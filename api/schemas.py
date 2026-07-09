@@ -13,6 +13,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from core.path_safety import looks_like_path_traversal, validate_repo_ref
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -70,6 +72,35 @@ class CreateDebateRequest(BaseModel):
         "a JSON summary is POSTed here when the debate completes",
     )
 
+    @field_validator("repo_ref")
+    @classmethod
+    def _validate_repo_ref_allowed(cls, v: str) -> str:
+        """Fail-fast, authoritative check (GAP: repo_ref had NO validation
+        at all — any authenticated caller could point Janus at an
+        arbitrary filesystem path). See core/path_safety.py — this is the
+        same allowlist check re-applied defensively in orchestrator.py
+        before sandbox_copy(), not a check that exists only here."""
+        try:
+            validate_repo_ref(v)
+        except ValueError as e:
+            raise ValueError(str(e)) from None
+        return v
+
+    @field_validator("target_file")
+    @classmethod
+    def _validate_target_file_not_obviously_malicious(cls, v: str) -> str:
+        """Best-effort denylist pre-check (no sandbox exists yet at
+        request-validation time, so this can't be the authoritative
+        resolve()+is_relative_to() check — that happens in
+        orchestrator.py once the sandbox path is known). Rejects the
+        obvious cases (absolute paths, '..' components) fast, with a 422,
+        instead of queuing a debate that fails deep in the worker."""
+        if looks_like_path_traversal(v):
+            raise ValueError(
+                "target_file must be a relative path with no '..' components"
+            )
+        return v
+
     @field_validator("pr_repo")
     @classmethod
     def _validate_pr_repo_format(cls, v: Optional[str]) -> Optional[str]:
@@ -82,13 +113,6 @@ class CreateDebateRequest(BaseModel):
     def _validate_webhook_scheme(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and not (v.startswith("http://") or v.startswith("https://")):
             raise ValueError("webhook_url must start with http:// or https://")
-        return v
-
-    @field_validator("target_file")
-    @classmethod
-    def _validate_target_file(cls, v: str) -> str:
-        if ".." in v or v.startswith("/") or v.startswith("\\"):
-            raise ValueError("target_file must be a safe relative path without parent traversals")
         return v
 
     @model_validator(mode="after")

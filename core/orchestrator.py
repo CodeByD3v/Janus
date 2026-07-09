@@ -52,6 +52,7 @@ from core.config import settings
 from core.gate import run_full_gate, sandbox_copy
 from core.llm_client import get_key_pool, is_rate_limit_error
 from core.observability import CostTracker, LLMCallStats, get_logger, metrics
+from core.path_safety import validate_repo_ref
 from storage.db import get_session
 from storage.models import DebateSession, Round
 
@@ -450,13 +451,28 @@ async def run_debate(
         target_file=target_file,
     )
 
+    # Defense-in-depth: api/schemas.py's field_validator already rejects
+    # an out-of-allowlist repo_ref at request time, but this call must not
+    # be the ONLY thing standing between an arbitrary repo_dir and
+    # shutil.copytree() below — a future caller of run_debate() that
+    # doesn't go through the API (a script, a different entrypoint) would
+    # otherwise have no protection at all. Same check, re-applied here.
+    try:
+        validate_repo_ref(repo_dir)
+    except ValueError as e:
+        error_msg = f"repo_ref rejected: {e}"
+        logger.error("debate_failed_repo_ref_validation", debate_id=debate_id, error=error_msg)
+        _persist_session_start(debate_id, repo_dir, target_file, ticket, tenant_id)
+        _persist_session_end(debate_id, False, {}, cost_tracker.to_dict(), None, error_msg)
+        return DebateResult(merged=False, sandbox_path=None)
+
     # Persist session start
     _persist_session_start(debate_id, repo_dir, target_file, ticket, tenant_id)
 
     sandbox = sandbox_copy(repo_dir)
     sandbox_resolved = sandbox.resolve()
     target_path = (sandbox_resolved / target_file).resolve()
-    
+
     if not target_path.is_relative_to(sandbox_resolved):
         error_msg = f"Path traversal denied: {target_file} is outside the sandbox"
         logger.error("debate_failed_path_traversal", debate_id=debate_id, error=error_msg)
@@ -464,7 +480,7 @@ async def run_debate(
         import shutil
         shutil.rmtree(sandbox, ignore_errors=True)
         return DebateResult(merged=False, sandbox_path=str(sandbox))
-        
+
     try:
         current_code = target_path.read_text()
     except Exception as e:
