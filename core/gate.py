@@ -181,20 +181,93 @@ def run_full_gate(repo_dir: str) -> dict:
     }
 
 
+def _resolve_candidate_test_path(repo_dir: str, filename: str) -> Path | None:
+    """Resolve where a Reviewer-written counterexample test lives, with
+    path-traversal protection. Returns None if filename tries to escape
+    the sandbox. Shared by write_candidate_test and run_candidate_test so
+    both agree on the exact same path — they must never drift apart, or
+    "run the file I just wrote" silently runs the wrong file.
+    """
+    repo_path = Path(repo_dir).resolve()
+    target = (repo_path / "tests" / filename).resolve()
+    if not target.is_relative_to(repo_path):
+        return None
+    return target
+
+
 def write_candidate_test(repo_dir: str, filename: str, content: str) -> dict:
     """Let the Reviewer materialize an executable counterexample as a real
     test file in the sandbox, so a critique becomes a concrete pass/fail
-    signal instead of prose."""
-    repo_path = Path(repo_dir).resolve()
-    target = (repo_path / "tests" / filename).resolve()
-    
-    if not target.is_relative_to(repo_path):
+    signal instead of prose.
+
+    IMPORTANT: writing this file does NOT guarantee it will be picked up
+    by run_tests()'s general `pytest -q` sweep. Many real repos configure
+    an explicit `testpaths` (in pytest.ini, tox.ini, or pyproject.toml)
+    that restricts discovery to a different directory — on such a repo,
+    a file written here can be silently skipped by run_tests() even
+    though it exists on disk. Use run_candidate_test() (below) to verify
+    THIS specific file actually executes and fails, rather than relying
+    on run_tests() to have swept it up. This was found and fixed after
+    verifying against a real repo (pytest-dev/pluggy) whose tox.ini
+    restricts testpaths to `testing/` — a file written to `tests/` there
+    never ran under a bare `pytest -q`, silently.
+    """
+    target = _resolve_candidate_test_path(repo_dir, filename)
+    if target is None:
         return {"error": "Path traversal denied: target must be inside the sandbox"}
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content)
     logger.info("candidate_test_written", target=str(target))
     return {"written": str(target)}
+
+
+def run_candidate_test(repo_dir: str, filename: str) -> dict:
+    """Run ONE specific Reviewer-written counterexample test directly by
+    exact file path, instead of relying on run_tests()'s repo-wide
+    `pytest -q` sweep to happen to discover it.
+
+    This matters because pytest only applies its own `testpaths` config
+    (from pytest.ini / tox.ini / pyproject.toml) when invoked with NO
+    explicit path arguments. Passing an exact file path on the command
+    line — which this function does — always collects that file
+    regardless of testpaths, sidestepping the exact failure mode
+    documented in write_candidate_test()'s docstring above.
+
+    filename must be the same value passed to write_candidate_test() —
+    both resolve through the identical path helper, so "run the file I
+    just wrote" can never silently target a different file.
+
+    Returns the same {"check", "passed", "detail"} shape as the other
+    run_* functions, so it slots into the same reasoning/logging
+    conventions the Reviewer already uses for run_tests/run_linter/etc.
+    """
+    target = _resolve_candidate_test_path(repo_dir, filename)
+    if target is None:
+        return {
+            "check": "candidate_test",
+            "passed": False,
+            "detail": "Path traversal denied: target must be inside the sandbox",
+        }
+    if not target.exists():
+        return {
+            "check": "candidate_test",
+            "passed": False,
+            "detail": (
+                f"No file at {filename} — call write_candidate_test() first, "
+                "with this exact filename."
+            ),
+        }
+
+    # Path relative to repo_dir, since _run's cwd is repo_dir — pytest
+    # needs the file argument relative to (or resolvable from) that cwd.
+    relative_path = target.relative_to(Path(repo_dir).resolve())
+    code, out = _run(["pytest", str(relative_path), "-q"], cwd=Path(repo_dir))
+    return {
+        "check": "candidate_test",
+        "passed": code == 0,
+        "detail": out or "clean",
+    }
 
 
 if __name__ == "__main__":

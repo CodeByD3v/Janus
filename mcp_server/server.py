@@ -76,6 +76,18 @@ def write_candidate_test(repo_dir: str, filename: str, content: str) -> dict:
     return gate.write_candidate_test(repo_dir, filename, content)
 
 
+@mcp.tool()
+def run_candidate_test(repo_dir: str, filename: str) -> dict:
+    """Run ONE specific counterexample test you just wrote with
+    write_candidate_test, by its exact filename. Use this — not
+    run_tests — to confirm your counterexample actually fails. run_tests
+    respects whatever test configuration the target repo itself defines
+    and can silently skip your file entirely on repos that restrict test
+    discovery to a different directory; this tool always runs your exact
+    file directly, regardless of that configuration."""
+    return gate.run_candidate_test(repo_dir, filename)
+
+
 def _smoke_test(repo_dir: str) -> None:
     result = run_full_gate(repo_dir)
     print("PASSED" if result["passed"] else "FAILED")

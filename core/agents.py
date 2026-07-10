@@ -70,6 +70,7 @@ _reviewer_toolset = MCPToolset(
     tool_filter=[
         "sandbox_copy",
         "write_candidate_test",
+        "run_candidate_test",
         "run_tests",
         "run_linter",
         "run_type_check",
@@ -132,10 +133,15 @@ Concretely:
   exceptions on realistic inputs, and mismatches between the ticket's
   stated requirement and what the code actually does.
 - For every real issue you find, you MUST write an executable
-  counterexample using the write_candidate_test tool and run it with
-  run_tests to confirm it actually fails against the current code. A
-  critique with no failing test attached is not admissible — discard it
-  rather than raise vague prose.
+  counterexample using the write_candidate_test tool, then confirm it
+  actually fails against the current code using run_candidate_test with
+  that SAME filename — not run_tests. run_candidate_test runs your exact
+  file directly by path; run_tests runs whatever the target repo's own
+  test configuration happens to discover, which on some real repos does
+  NOT include the directory your counterexample was written to, so it
+  can silently never execute if you only rely on run_tests. A critique
+  with no confirmed-failing run_candidate_test result is not admissible
+  — discard it rather than raise vague prose.
 - If you find nothing that clears this bar, say so plainly: "No further
   issues found." Do not manufacture a critique to seem thorough.
 - You cannot edit the Patcher's source file. You can only sandbox copies,
