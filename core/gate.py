@@ -132,46 +132,156 @@ def sandbox_copy(repo_dir: str) -> Path:
     return tmp
 
 
-def run_linter(repo_dir: str) -> dict:
-    """Run ruff (style + safety lint rules) over the sandboxed repo."""
-    code, out = _run(["ruff", "check", "."], cwd=Path(repo_dir))
+def _resolve_scoped_path(repo_dir: str, target_file: str) -> Path | None:
+    """Resolve target_file against repo_dir with traversal protection.
+    Returns None if it would escape repo_dir.
+
+    Needed because run_linter/run_type_check/run_security_scan are
+    exposed directly as MCP tools to both the Patcher and Reviewer (see
+    agents.py's tool_filters) — an agent could call these with an
+    arbitrary target_file argument independent of whatever validation
+    orchestrator.py already does upstream. Same defense-in-depth
+    reasoning as _resolve_candidate_test_path, generalized (no hardcoded
+    "tests" subdirectory this time, since these checks scope to whatever
+    file the caller names, not always a test file).
+    """
+    repo_path = Path(repo_dir).resolve()
+    target = (repo_path / target_file).resolve()
+    if not target.is_relative_to(repo_path):
+        return None
+    return target
+
+
+def run_linter(repo_dir: str, target_file: str | None = None) -> dict:
+    """Run ruff (style + safety lint rules).
+
+    Scoped to target_file when given (GAP: mypy/ruff/bandit previously
+    always scanned the whole repo, surfacing pre-existing lint/type/
+    security debt unrelated to the patch and failing the gate on repos
+    that were never clean to begin with — verified on a real external
+    repo, pytest-dev/pluggy). This scoping is not a compromise: the
+    Patcher can only ever write to target_file (orchestrator.py's
+    run_debate never touches any other path), so a patch cannot
+    introduce a NEW lint/type/security issue anywhere else — scanning
+    just target_file is complete, not partial, for these three checks
+    specifically. run_tests is deliberately NOT scoped this way — see
+    its own docstring for why.
+    """
+    if target_file:
+        target = _resolve_scoped_path(repo_dir, target_file)
+        if target is None:
+            return {
+                "check": "linter",
+                "passed": False,
+                "detail": "target_file escapes the sandbox — refusing to scan.",
+            }
+        code, out = _run(["ruff", "check", target_file], cwd=Path(repo_dir))
+    else:
+        code, out = _run(["ruff", "check", "."], cwd=Path(repo_dir))
     return {"check": "linter", "passed": code == 0, "detail": out or "clean"}
 
 
-def run_type_check(repo_dir: str) -> dict:
-    """Run mypy over the sandboxed repo."""
-    code, out = _run(
-        ["mypy", "--ignore-missing-imports", "."], cwd=Path(repo_dir)
-    )
+def run_type_check(repo_dir: str, target_file: str | None = None) -> dict:
+    """Run mypy. Scoped to target_file when given — see run_linter's
+    docstring for why this scoping is sound, not just convenient.
+
+    This directly fixes a real, verified crash: `mypy --ignore-missing-
+    imports .` treats the whole repo as one package tree and errors out
+    ("Duplicate module named 'x'") on any repo with two files sharing a
+    module name in different directories — a very common pattern (e.g.
+    multiple example/subproject dirs each with their own setup.py).
+    Scoping to a single explicit file sidesteps that whole-tree package
+    resolution entirely; mypy checking one file was never the thing that
+    broke. Verified against pytest-dev/pluggy, which has exactly this
+    duplicate-module structure in its docs/examples/ directory.
+    """
+    if target_file:
+        target = _resolve_scoped_path(repo_dir, target_file)
+        if target is None:
+            return {
+                "check": "type_check",
+                "passed": False,
+                "detail": "target_file escapes the sandbox — refusing to scan.",
+            }
+        code, out = _run(
+            ["mypy", "--ignore-missing-imports", target_file], cwd=Path(repo_dir)
+        )
+    else:
+        code, out = _run(
+            ["mypy", "--ignore-missing-imports", "."], cwd=Path(repo_dir)
+        )
     return {"check": "type_check", "passed": code == 0, "detail": out or "clean"}
 
 
 def run_tests(repo_dir: str) -> dict:
-    """Run the existing (and any newly added) pytest suite."""
+    """Run the existing (and any newly added) pytest suite.
+
+    DELIBERATELY NOT scoped to target_file, unlike run_linter/
+    run_type_check/run_security_scan above. Those three are static,
+    per-file analyses where the Patcher's single-file write means
+    scoping is complete (see run_linter's docstring). Test execution is
+    different in kind: it's a RUNTIME check across the whole call graph,
+    and a patch to target_file can absolutely break a test that exercises
+    a different file entirely (the exact cross-file breakage
+    repo_context.py's call-graph retrieval exists to help the Reviewer
+    anticipate). Narrowing this to "just run tests for target_file" would
+    require guessing a test-file naming convention — the same class of
+    fragile assumption that caused the write_candidate_test/run_tests
+    bug fixed earlier — and would silently stop catching genuine
+    regressions in exchange for dodging pre-existing test debt.
+
+    This means the "gate conflates pre-existing repo debt with
+    patch-introduced regressions" problem, as verified on pytest-dev/
+    pluggy (5 tests failing on its own unmodified main), is NOT solved by
+    this scoping change for tests specifically — only for lint/type/
+    security. Solving it for tests requires comparing against a baseline
+    run of the unpatched repo, a materially different (and pricier)
+    mechanism than scoping, and remains open.
+    """
     code, out = _run(["pytest", "-q"], cwd=Path(repo_dir))
     return {"check": "tests", "passed": code == 0, "detail": out or "clean"}
 
 
-def run_security_scan(repo_dir: str) -> dict:
-    """Run bandit to catch injection patterns, unsafe deserialization, etc."""
-    code, out = _run(
-        ["bandit", "-q", "-r", ".", "-x", "./tests"], cwd=Path(repo_dir)
-    )
+def run_security_scan(repo_dir: str, target_file: str | None = None) -> dict:
+    """Run bandit. Scoped to target_file when given — see run_linter's
+    docstring for why this scoping is sound, not just convenient."""
+    if target_file:
+        target = _resolve_scoped_path(repo_dir, target_file)
+        if target is None:
+            return {
+                "check": "security_scan",
+                "passed": False,
+                "detail": "target_file escapes the sandbox — refusing to scan.",
+            }
+        # No -r (recursive) or -x (exclude dir) flags here — both are
+        # directory-scan concepts that don't apply to a single file.
+        code, out = _run(["bandit", "-q", target_file], cwd=Path(repo_dir))
+    else:
+        code, out = _run(
+            ["bandit", "-q", "-r", ".", "-x", "./tests"], cwd=Path(repo_dir)
+        )
     return {"check": "security_scan", "passed": code == 0, "detail": out or "clean"}
 
 
-def run_full_gate(repo_dir: str) -> dict:
-    """Run all four checks. The patch only merges if every check passes."""
+def run_full_gate(repo_dir: str, target_file: str | None = None) -> dict:
+    """Run all four checks. The patch only merges if every check passes.
+
+    target_file, when given, scopes the three static checks (lint, type,
+    security) to just that file — see run_linter's docstring for why
+    that's sound given this system's architecture. run_tests always runs
+    the full suite regardless, by design — see run_tests's docstring.
+    """
     checks = [
-        run_linter(repo_dir),
-        run_type_check(repo_dir),
+        run_linter(repo_dir, target_file),
+        run_type_check(repo_dir, target_file),
         run_tests(repo_dir),
-        run_security_scan(repo_dir),
+        run_security_scan(repo_dir, target_file),
     ]
     passed = all(c["passed"] for c in checks)
     logger.info(
         "gate_result",
         repo_dir=repo_dir,
+        target_file=target_file,
         passed=passed,
         checks={c["check"]: c["passed"] for c in checks},
     )
