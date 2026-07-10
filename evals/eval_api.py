@@ -20,7 +20,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Patch DATABASE_URL to use in-memory SQLite BEFORE importing the app
-os.environ.setdefault("DATABASE_URL", "sqlite:///")
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+
+# Every test in this file uses repo_ref="demo_repo" (relative to the repo
+# root, matching how `pytest` is invoked from CI/locally). The repo_ref
+# allowlist (core/path_safety.py) is fail-closed by design — an empty
+# ALLOWED_REPO_ROOTS rejects every repo_ref, including this test suite's
+# own fixtures, unless explicitly configured here.
+os.environ.setdefault(
+    "ALLOWED_REPO_ROOTS", str(Path(__file__).resolve().parent.parent)
+)
 
 from fastapi.testclient import TestClient  # noqa: E402
 

@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,23 @@ from pydantic import ValidationError
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from core.config import settings as real_settings  # noqa: E402
 from retrieval_pipeline.schema import RealCatchExample, validate_record  # noqa: E402
+
+
+def _settings_with(**overrides):
+    """Settings is a frozen dataclass singleton — monkeypatch.setattr
+    can't mutate a field on it directly (raises FrozenInstanceError).
+    Build a fresh copy with just the needed overrides instead.
+
+    Also note: retrieval.py does `from core.config import settings`,
+    binding its OWN local name at import time — patching
+    `core.config.settings` alone does not affect that already-bound
+    reference. Callers of this helper must patch `core.retrieval.settings`
+    (the name actually read at call time inside retrieval.py), not
+    `core.config.settings`.
+    """
+    return replace(real_settings, **overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -42,10 +59,16 @@ def temp_chroma_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Create a temporary ChromaDB directory and patch settings to use it."""
     chroma_dir = str(tmp_path / "chroma_test")
     collection_name = f"test_{uuid.uuid4().hex[:8]}"
-    monkeypatch.setattr("core.config.settings.CHROMA_PERSIST_DIR", chroma_dir)
-    monkeypatch.setattr("core.config.settings.CHROMA_COLLECTION", collection_name)
-    # Reset module-level singletons in retrieval.py so they pick up new settings
     import core.retrieval as retrieval
+
+    monkeypatch.setattr(
+        retrieval,
+        "settings",
+        _settings_with(
+            CHROMA_PERSIST_DIR=chroma_dir, CHROMA_COLLECTION=collection_name
+        ),
+    )
+    # Reset module-level singletons in retrieval.py so they pick up new settings
     monkeypatch.setattr(retrieval, "_chroma_client", None)
     monkeypatch.setattr(retrieval, "_collection", None)
     monkeypatch.setattr(retrieval, "_embedder", None)
@@ -135,7 +158,14 @@ class TestRetrievalStore:
         seed_jsonl: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("core.config.settings.SEED_DATA_PATH", str(seed_jsonl))
+        import core.retrieval as retrieval
+        # Layer SEED_DATA_PATH on top of whatever temp_chroma_dir already
+        # patched (CHROMA_PERSIST_DIR/CHROMA_COLLECTION) — replace() from
+        # the CURRENT retrieval.settings, not real_settings, or this
+        # would silently undo the fixture's overrides.
+        monkeypatch.setattr(
+            retrieval, "settings", replace(retrieval.settings, SEED_DATA_PATH=str(seed_jsonl))
+        )
         from core.retrieval import initialize_store, _get_collection
         initialize_store()
         collection = _get_collection()
@@ -151,7 +181,10 @@ class TestRetrievalStore:
         seed_jsonl: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("core.config.settings.SEED_DATA_PATH", str(seed_jsonl))
+        import core.retrieval as retrieval
+        monkeypatch.setattr(
+            retrieval, "settings", replace(retrieval.settings, SEED_DATA_PATH=str(seed_jsonl))
+        )
         from core.retrieval import initialize_store, retrieve_examples
         initialize_store()
 
@@ -171,9 +204,11 @@ class TestRetrievalStore:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Seed, reset singletons (simulating restart), retrieve again."""
-        monkeypatch.setattr("core.config.settings.SEED_DATA_PATH", str(seed_jsonl))
-        from core.retrieval import initialize_store, retrieve_examples
         import core.retrieval as retrieval
+        monkeypatch.setattr(
+            retrieval, "settings", replace(retrieval.settings, SEED_DATA_PATH=str(seed_jsonl))
+        )
+        from core.retrieval import initialize_store, retrieve_examples
 
         initialize_store()
 

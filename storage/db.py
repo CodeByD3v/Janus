@@ -23,6 +23,7 @@ from typing import Optional
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from core.config import settings
 from core.observability import get_logger
@@ -30,18 +31,52 @@ from storage.models import Base, DebateSession
 
 logger = get_logger(__name__)
 
+
+def _is_in_memory_sqlite(database_url: str) -> bool:
+    """True for `sqlite:///:memory:` and the ambiguous bare `sqlite:///`
+    form (no path at all) — both create a private, connection-scoped
+    database under SQLAlchemy's default pooling, NOT a real shared file.
+
+    This matters: without StaticPool, every new connection checkout (e.g.
+    every FastAPI request routed through Starlette's threadpool for a
+    sync `def` endpoint — see api/app.py) gets its OWN fresh, empty
+    database, completely disconnected from whatever run_migrations()
+    created tables in. Symptom: `OperationalError: no such table` on
+    every query, even immediately after a successful migration.
+
+    A real file path (`sqlite:///./app.db`) is unaffected by this and
+    does not need StaticPool — the file itself is the shared state, not
+    the connection.
+    """
+    if not database_url.startswith("sqlite"):
+        return False
+    # sqlite:///:memory:  -> path component is exactly ":memory:"
+    # sqlite:///           -> path component is empty
+    path = database_url.split("///", 1)[-1] if "///" in database_url else ""
+    return path in ("", ":memory:")
+
+
+_engine_kwargs: dict = {
+    "echo": False,
+    "pool_pre_ping": True,
+}
+
+if settings.DATABASE_URL.startswith("sqlite"):
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
+    if _is_in_memory_sqlite(settings.DATABASE_URL):
+        # StaticPool reuses a single connection for every checkout, so
+        # the database migrations create and the database every request
+        # queries are guaranteed to be the same one. Without this, an
+        # in-memory SQLite URL is effectively unusable the moment more
+        # than one connection is ever opened against it.
+        _engine_kwargs["poolclass"] = StaticPool
+        logger.info(
+            "in_memory_sqlite_detected",
+            detail="Using StaticPool so all connections share one database.",
+        )
+
 # Engine and session factory — created once at module level.
-_engine = create_engine(
-    settings.DATABASE_URL,
-    echo=False,
-    # SQLite needs check_same_thread=False for multi-threaded use
-    connect_args=(
-        {"check_same_thread": False}
-        if settings.DATABASE_URL.startswith("sqlite")
-        else {}
-    ),
-    pool_pre_ping=True,
-)
+_engine = create_engine(settings.DATABASE_URL, **_engine_kwargs)
 _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False)
 
 

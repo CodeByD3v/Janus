@@ -35,6 +35,12 @@ jobs:
         run: mypy --ignore-missing-imports .
 
       # ── Eval suites (unit-level, no API key needed) ───────
+      # NOTE: each file is listed explicitly rather than pointing pytest
+      # at the evals/ directory. Directory-based collection was found to
+      # silently collect 0 tests against this project's evals/__init__.py
+      # + pyproject.toml testpaths combination on newer pytest — explicit
+      # paths sidestep that entirely and are also just more legible in
+      # CI output (one named step per suite instead of one aggregate run).
       - name: Eval — gate
         run: pytest evals/eval_gate.py -v
 
@@ -44,9 +50,30 @@ jobs:
       - name: Eval — API
         run: pytest evals/eval_api.py -v
 
+      - name: Eval — repository-context retrieval (GAP 14)
+        run: pytest evals/eval_repo_context.py -v
+
+      - name: Eval — multi-key LLM pool (GAP 15)
+        env:
+          GOOGLE_API_KEYS: "ci-dummy-key-a,ci-dummy-key-b"
+        run: pytest evals/eval_llm_client.py -v
+
+      - name: Eval — notifications (GAP 17)
+        run: pytest evals/eval_notifications.py -v
+
+      - name: Eval — path safety (repo_ref allowlist, target_file denylist)
+        run: pytest evals/eval_path_safety.py -v
+
       # ── Integration tests (require GOOGLE_API_KEY) ────────
       - name: Eval — reviewer (integration)
-        if: ${{ env.GOOGLE_API_KEY != '' }}
+        # A step's own `env:` block is not available to that same step's
+        # `if:` condition — only workflow/job-level env vars are. This
+        # must check `secrets` directly, or the step silently never runs
+        # even when GOOGLE_API_KEY is genuinely configured. (Found while
+        # auditing this file: the previous `env.GOOGLE_API_KEY != ''`
+        # form always evaluates false, since nothing sets that env var
+        # before this condition is checked.)
+        if: ${{ secrets.GOOGLE_API_KEY != '' }}
         env:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         run: pytest evals/eval_reviewer.py -v -m integration
