@@ -30,34 +30,48 @@ mcp = FastMCP("adversarial-review-gate")
 
 
 @mcp.tool()
-def run_linter(repo_dir: str) -> dict:
-    """Run ruff static-analysis lint checks over the given repo directory."""
-    return gate.run_linter(repo_dir)
+def run_linter(repo_dir: str, target_file: str | None = None) -> dict:
+    """Run ruff static-analysis lint checks. Pass target_file to scope the
+    check to just that file — always correct to do so if you only changed
+    one file, since ruff will only ever report on what's actually there."""
+    return gate.run_linter(repo_dir, target_file)
 
 
 @mcp.tool()
-def run_type_check(repo_dir: str) -> dict:
-    """Run mypy type checking over the given repo directory."""
-    return gate.run_type_check(repo_dir)
+def run_type_check(repo_dir: str, target_file: str | None = None) -> dict:
+    """Run mypy type checking. Pass target_file to scope the check to just
+    that file — recommended, since checking the whole repo can fail with
+    an unrelated 'Duplicate module named' error on repos containing
+    multiple subdirectories with same-named files (e.g. multiple example
+    projects each with their own setup.py), which has nothing to do with
+    your patch."""
+    return gate.run_type_check(repo_dir, target_file)
 
 
 @mcp.tool()
 def run_tests(repo_dir: str) -> dict:
-    """Run the pytest suite in the given repo directory and report pass/fail."""
+    """Run the FULL pytest suite in the given repo directory and report
+    pass/fail. Always runs every test, not just ones related to a
+    specific file — this is the one check that can catch a patch
+    breaking something elsewhere in the repo, so it is intentionally not
+    scopeable to a single file."""
     return gate.run_tests(repo_dir)
 
 
 @mcp.tool()
-def run_security_scan(repo_dir: str) -> dict:
-    """Run bandit security scanning over the given repo directory."""
-    return gate.run_security_scan(repo_dir)
+def run_security_scan(repo_dir: str, target_file: str | None = None) -> dict:
+    """Run bandit security scanning. Pass target_file to scope the check
+    to just that file."""
+    return gate.run_security_scan(repo_dir, target_file)
 
 
 @mcp.tool()
-def run_full_gate(repo_dir: str) -> dict:
+def run_full_gate(repo_dir: str, target_file: str | None = None) -> dict:
     """Run the complete deterministic gate: lint + types + tests + security.
-    A patch may only be merged if this returns passed=true."""
-    return gate.run_full_gate(repo_dir)
+    A patch may only be merged if this returns passed=true. target_file,
+    when given, scopes lint/type/security to that file only (tests always
+    run in full — see run_tests)."""
+    return gate.run_full_gate(repo_dir, target_file)
 
 
 @mcp.tool()

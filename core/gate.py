@@ -194,6 +194,17 @@ def run_type_check(repo_dir: str, target_file: str | None = None) -> dict:
     resolution entirely; mypy checking one file was never the thing that
     broke. Verified against pytest-dev/pluggy, which has exactly this
     duplicate-module structure in its docs/examples/ directory.
+
+    Also passes --follow-imports=silent when scoped: mypy still follows
+    imports to resolve types correctly (so cross-file calls type-check
+    accurately), but suppresses ERRORS from files other than target_file
+    itself. Without this, a pre-existing, unrelated mypy error in a file
+    target_file happens to import could still fail the gate on a patch
+    that never touched that file — verified concretely: pluggy's own
+    unmodified _callers.py has one pre-existing "unused type: ignore"
+    finding, surfaced via _hooks.py's import of it, that this flag
+    correctly suppresses while still catching a real type error
+    deliberately introduced directly into _hooks.py itself in testing.
     """
     if target_file:
         target = _resolve_scoped_path(repo_dir, target_file)
@@ -204,7 +215,13 @@ def run_type_check(repo_dir: str, target_file: str | None = None) -> dict:
                 "detail": "target_file escapes the sandbox — refusing to scan.",
             }
         code, out = _run(
-            ["mypy", "--ignore-missing-imports", target_file], cwd=Path(repo_dir)
+            [
+                "mypy",
+                "--ignore-missing-imports",
+                "--follow-imports=silent",
+                target_file,
+            ],
+            cwd=Path(repo_dir),
         )
     else:
         code, out = _run(

@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import settings as real_settings  # noqa: E402
 from core.gate import (  # noqa: E402
+    _resolve_scoped_path,
     run_candidate_test,
     run_full_gate,
     run_linter,
@@ -162,6 +163,145 @@ class TestRunSecurityScan:
         assert result["check"] == "security_scan"
         assert isinstance(result["passed"], bool)
         assert "detail" in result
+
+
+class TestScopedChecks:
+    """Covers the fix for two real, verified problems with running
+    lint/type/security checks unscoped (against the whole repo):
+
+    1. mypy crashes outright ("Duplicate module named") on any repo with
+       two files sharing a module name in different directories — a
+       common real pattern (e.g. multiple example subprojects, each with
+       their own setup.py). Scoping to target_file sidesteps whole-tree
+       package resolution entirely.
+    2. Even scoped, mypy's default import-following can still surface
+       pre-existing, unrelated errors in files target_file imports —
+       fixed with --follow-imports=silent, which suppresses those while
+       still catching a genuine new error introduced directly in
+       target_file itself.
+
+    Scoping is sound, not just convenient, because the Patcher can only
+    ever write to target_file (orchestrator.py never touches any other
+    path) — see run_linter's docstring in gate.py. Both findings were
+    verified against a real external repo (pytest-dev/pluggy) before
+    this fix existed, and reproduced here with synthetic fixtures so
+    they don't depend on network access to clone anything.
+    """
+
+    def test_linter_scoped_to_bad_file_fails(self, tmp_path: Path) -> None:
+        repo = _make_clean_repo(tmp_path)
+        (repo / "bad_scoped.py").write_text("import os\nimport sys\n\nx=1\n")
+        result = run_linter(str(repo), "bad_scoped.py")
+        assert result["passed"] is False
+
+    def test_linter_scoped_to_clean_file_passes(self, tmp_path: Path) -> None:
+        repo = _make_clean_repo(tmp_path)
+        (repo / "good_scoped.py").write_text("x = 1\n")
+        result = run_linter(str(repo), "good_scoped.py")
+        assert result["passed"] is True
+
+    def test_linter_scoped_path_traversal_denied(self, tmp_path: Path) -> None:
+        repo = _make_clean_repo(tmp_path)
+        result = run_linter(str(repo), "../../../etc/passwd")
+        assert result["passed"] is False
+        assert "escapes" in result["detail"]
+
+    def test_type_check_duplicate_module_crash_is_avoided_when_scoped(
+        self, tmp_path: Path
+    ) -> None:
+        """Reproduces the exact structural pattern found on pytest-dev/
+        pluggy: two files sharing a module name in different
+        subdirectories, which makes unscoped `mypy .` fail outright with
+        'Duplicate module named', unrelated to any actual type error."""
+        repo = tmp_path / "multi_subproject_repo"
+        repo.mkdir()
+        (repo / "main.py").write_text("x: int = 1\n")
+
+        example_a = repo / "examples" / "project_a"
+        example_b = repo / "examples" / "project_b"
+        example_a.mkdir(parents=True)
+        example_b.mkdir(parents=True)
+        (example_a / "setup.py").write_text("# example project A\n")
+        (example_b / "setup.py").write_text("# example project B\n")
+
+        # Sanity check: unscoped mypy genuinely crashes on this fixture —
+        # confirms the fixture reproduces the bug, not just asserts the fix.
+        unscoped = run_type_check(str(repo))
+        assert unscoped["passed"] is False
+        assert "Duplicate module" in unscoped["detail"]
+
+        # The fix: scoped to main.py, the duplicate examples are never
+        # touched by mypy's package resolution at all.
+        scoped = run_type_check(str(repo), "main.py")
+        assert scoped["passed"] is True
+
+    def test_type_check_suppresses_preexisting_error_in_imported_file(
+        self, tmp_path: Path
+    ) -> None:
+        """--follow-imports=silent: a pre-existing mypy error in a file
+        target_file imports must not fail the gate for a patch that never
+        touched that file."""
+        repo = tmp_path / "repo_with_debt"
+        repo.mkdir()
+        (repo / "helper.py").write_text(
+            "def helper() -> int:  # type: ignore[misc]\n    return 1\n"
+        )
+        (repo / "main.py").write_text("from helper import helper\nx = helper()\n")
+
+        # helper.py's ignore comment is unnecessary (no actual error there),
+        # which mypy flags as "unused ignore" — genuine pre-existing debt.
+        result = run_type_check(str(repo), "main.py")
+        assert result["passed"] is True
+
+    def test_type_check_still_catches_real_error_in_target_file(
+        self, tmp_path: Path
+    ) -> None:
+        """--follow-imports=silent must not become a blanket suppression
+        — a real type error introduced directly in target_file itself
+        must still fail the check."""
+        repo = tmp_path / "repo_with_real_bug"
+        repo.mkdir()
+        (repo / "helper.py").write_text("def helper() -> int:\n    return 1\n")
+        (repo / "main.py").write_text(
+            "from helper import helper\nx: str = helper()\n"
+        )
+        result = run_type_check(str(repo), "main.py")
+        assert result["passed"] is False
+
+    def test_security_scan_scoped_to_insecure_file_fails(self, tmp_path: Path) -> None:
+        repo = _make_clean_repo(tmp_path)
+        (repo / "insecure.py").write_text(
+            'import subprocess\nsubprocess.call("ls", shell=True)\n'
+        )
+        result = run_security_scan(str(repo), "insecure.py")
+        assert result["passed"] is False
+
+    def test_resolve_scoped_path_denies_traversal(self, tmp_path: Path) -> None:
+        repo = _make_clean_repo(tmp_path)
+        assert _resolve_scoped_path(str(repo), "../../../etc/passwd") is None
+        assert _resolve_scoped_path(str(repo), "hello.py") is not None
+
+    def test_full_gate_scopes_static_checks_but_not_tests(self, tmp_path: Path) -> None:
+        """run_full_gate must pass target_file through to lint/type/
+        security, but run_tests always runs the full suite regardless —
+        pin that asymmetry so it can't silently drift."""
+        repo = _make_clean_repo(tmp_path)
+        result = run_full_gate(str(repo), "hello.py")
+        checks_by_name = {c["check"]: c for c in result["checks"]}
+        assert set(checks_by_name) == {
+            "linter", "type_check", "tests", "security_scan"
+        }
+        assert result["passed"] is True
+
+    def test_full_gate_without_target_file_still_scans_whole_repo(
+        self, tmp_path: Path
+    ) -> None:
+        """Backward compatibility: omitting target_file must behave
+        exactly as before this change — no silent behavior shift for
+        existing callers that don't pass it."""
+        repo = _make_bad_lint_repo(tmp_path)
+        result = run_full_gate(str(repo))
+        assert result["passed"] is False
 
 
 class TestRunFullGate:

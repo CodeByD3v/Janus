@@ -648,7 +648,7 @@ async def _run_debate_inner(
             )
             break
 
-        gate_result = run_full_gate(str(sandbox))
+        gate_result = run_full_gate(str(sandbox), target_file)
 
         # Track gate check pass/fail by type
         for check in gate_result.get("checks", []):
@@ -730,7 +730,7 @@ async def _run_debate_inner(
         target_path.write_text(current_code)
 
     # Final gate
-    final_gate = run_full_gate(str(sandbox))
+    final_gate = run_full_gate(str(sandbox), target_file)
     result.final_gate = final_gate
     result.merged = final_gate["passed"]
     result.cost = cost_tracker.to_dict()
