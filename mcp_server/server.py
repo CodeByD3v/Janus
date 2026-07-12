@@ -29,11 +29,29 @@ import core.gate as gate  # noqa: E402
 mcp = FastMCP("adversarial-review-gate")
 
 
+def _ensure_safe_repo_dir(repo_dir: str) -> None:
+    """Prevent the LLM from passing arbitrary paths (like /etc) to MCP tools."""
+    import tempfile
+    from core.path_safety import validate_repo_ref
+
+    repo_path = Path(repo_dir).resolve()
+    temp_path = Path(tempfile.gettempdir()).resolve()
+
+    if repo_path.is_relative_to(temp_path) and repo_path.name.startswith("adv_review_sandbox_"):
+        return
+
+    try:
+        validate_repo_ref(repo_dir)
+    except ValueError:
+        raise ValueError(f"Access denied: {repo_dir} is neither an allowed repo root nor a valid sandbox.")
+
+
 @mcp.tool()
 def run_linter(repo_dir: str, target_file: str | None = None) -> dict:
     """Run ruff static-analysis lint checks. Pass target_file to scope the
     check to just that file — always correct to do so if you only changed
     one file, since ruff will only ever report on what's actually there."""
+    _ensure_safe_repo_dir(repo_dir)
     return gate.run_linter(repo_dir, target_file)
 
 
@@ -45,6 +63,7 @@ def run_type_check(repo_dir: str, target_file: str | None = None) -> dict:
     multiple subdirectories with same-named files (e.g. multiple example
     projects each with their own setup.py), which has nothing to do with
     your patch."""
+    _ensure_safe_repo_dir(repo_dir)
     return gate.run_type_check(repo_dir, target_file)
 
 
@@ -55,6 +74,7 @@ def run_tests(repo_dir: str) -> dict:
     specific file — this is the one check that can catch a patch
     breaking something elsewhere in the repo, so it is intentionally not
     scopeable to a single file."""
+    _ensure_safe_repo_dir(repo_dir)
     return gate.run_tests(repo_dir)
 
 
@@ -62,6 +82,7 @@ def run_tests(repo_dir: str) -> dict:
 def run_security_scan(repo_dir: str, target_file: str | None = None) -> dict:
     """Run bandit security scanning. Pass target_file to scope the check
     to just that file."""
+    _ensure_safe_repo_dir(repo_dir)
     return gate.run_security_scan(repo_dir, target_file)
 
 
@@ -71,6 +92,7 @@ def run_full_gate(repo_dir: str, target_file: str | None = None) -> dict:
     A patch may only be merged if this returns passed=true. target_file,
     when given, scopes lint/type/security to that file only (tests always
     run in full — see run_tests)."""
+    _ensure_safe_repo_dir(repo_dir)
     return gate.run_full_gate(repo_dir, target_file)
 
 
@@ -79,6 +101,7 @@ def sandbox_copy(repo_dir: str) -> dict:
     """Create an isolated sandbox copy of a repo directory and return its path.
     Use this before writing any candidate patch or test, so nothing touches
     the real working tree until it has passed the gate."""
+    _ensure_safe_repo_dir(repo_dir)
     return {"sandbox_path": str(gate.sandbox_copy(repo_dir))}
 
 
@@ -87,6 +110,7 @@ def write_candidate_test(repo_dir: str, filename: str, content: str) -> dict:
     """Write an executable counterexample test into a sandboxed repo.
     Use this to turn a natural-language critique ('this breaks on empty
     input') into a concrete, runnable pytest test."""
+    _ensure_safe_repo_dir(repo_dir)
     return gate.write_candidate_test(repo_dir, filename, content)
 
 
@@ -99,6 +123,7 @@ def run_candidate_test(repo_dir: str, filename: str) -> dict:
     and can silently skip your file entirely on repos that restrict test
     discovery to a different directory; this tool always runs your exact
     file directly, regardless of that configuration."""
+    _ensure_safe_repo_dir(repo_dir)
     return gate.run_candidate_test(repo_dir, filename)
 
 

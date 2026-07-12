@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -49,6 +50,7 @@ class Worker:
         self.running = True
         self._active_tasks: set[asyncio.Task[None]] = set()
         self._semaphore = asyncio.Semaphore(settings.WORKER_MAX_CONCURRENT)
+        self._last_zombie_sweep: float = 0.0
 
     async def start(self) -> None:
         """Main worker loop. Polls for queued sessions and dispatches debates."""
@@ -70,6 +72,11 @@ class Worker:
         while self.running:
             try:
                 await self._poll_cycle()
+                
+                now = time.monotonic()
+                if now - self._last_zombie_sweep > 300:
+                    self._sweep_zombies()
+                    self._last_zombie_sweep = now
             except Exception:
                 logger.error("worker_poll_error", exc_info=True)
 
@@ -112,6 +119,29 @@ class Worker:
 
         task = asyncio.create_task(self._run_debate(session_id))
         self._active_tasks.add(task)
+
+    def _sweep_zombies(self) -> None:
+        """Find debates that are stuck in 'running' for too long and mark them as error."""
+        from datetime import timedelta
+        
+        timeout_delta = timedelta(hours=2)
+        cutoff = datetime.now(timezone.utc) - timeout_delta
+        
+        try:
+            with get_session() as db:
+                zombies = db.query(DebateSession).filter(
+                    DebateSession.status == "running",
+                    DebateSession.updated_at < cutoff
+                ).all()
+                for z in zombies:
+                    logger.warning("sweeping_zombie_debate", debate_id=z.id, updated_at=z.updated_at.isoformat())
+                    z.status = "error"  # type: ignore[assignment]
+                    z.error_message = "Debate timed out or abandoned by a crashed worker."  # type: ignore[assignment]
+                    z.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+                if zombies:
+                    db.commit()
+        except Exception as e:
+            logger.error("zombie_sweep_error", error=str(e))
 
     async def _run_debate(self, session_id: str) -> None:
         """Run a single debate, guarded by the concurrency semaphore."""

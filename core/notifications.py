@@ -152,13 +152,43 @@ def post_github_pr_comment(pr_repo: str, pr_number: int, body: str) -> bool:
         return False
 
 
+def _is_safe_webhook_url(url: str) -> bool:
+    import socket
+    import ipaddress
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        
+        # Resolve all IPs for the hostname
+        addrinfo = socket.getaddrinfo(hostname, None)
+        for info in addrinfo:
+            ip_str = info[4][0]
+            ip_obj = ipaddress.ip_address(ip_str)
+            if (ip_obj.is_private or ip_obj.is_loopback or 
+                ip_obj.is_link_local or ip_obj.is_multicast or 
+                ip_obj.is_reserved or ip_obj.is_unspecified):
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def post_webhook(url: str, payload: dict[str, Any]) -> bool:
     """POST a JSON summary payload to a configured webhook URL.
 
     Never raises. Returns True on success, False on any failure.
     """
+    if not _is_safe_webhook_url(url):
+        logger.warning("webhook_notification_rejected_ssrf", url=url)
+        return False
+        
     try:
-        resp = requests.post(url, json=payload, timeout=settings.NOTIFICATION_TIMEOUT_SECONDS)
+        resp = requests.post(url, json=payload, timeout=settings.NOTIFICATION_TIMEOUT_SECONDS, allow_redirects=False)
         if resp.status_code >= 300:
             logger.warning(
                 "webhook_notification_failed",
