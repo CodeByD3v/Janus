@@ -102,7 +102,20 @@ def _make_failing_test_repo(tmp: Path) -> Path:
 
 
 class TestSandboxCopy:
-    def test_creates_isolated_dir(self, tmp_path: Path) -> None:
+    def test_creates_isolated_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # validate_repo_ref() lives in core.path_safety and reads ITS OWN
+        # bound `settings` name (from `from core.config import settings`
+        # at the top of that module) — patching core.gate.settings has no
+        # effect on it, even though gate.py imports validate_repo_ref.
+        import core.path_safety as path_safety_module
+        monkeypatch.setattr(
+            path_safety_module,
+            "settings",
+            _settings_with(ALLOWED_REPO_ROOTS=str(tmp_path)),
+        )
+
         src = tmp_path / "src_repo"
         src.mkdir()
         (src / "file.py").write_text("x = 1\n")
@@ -115,6 +128,109 @@ class TestSandboxCopy:
         (sandbox / "file.py").write_text("x = 2\n")
         assert (src / "file.py").read_text() == "x = 1\n"
         shutil.rmtree(sandbox)
+
+
+class TestRepoDirValidation:
+    """Covers a finding from a follow-up security audit: every function
+    in gate.py is exposed directly as an MCP tool to the Patcher/Reviewer
+    agents (see mcp_server/server.py), so an agent's own tool-call
+    arguments reach these functions with NO validation from
+    orchestrator.py in between — orchestrator.py's own repo_ref
+    validation only guards the ONE call IT makes into sandbox_copy(), not
+    any call an agent makes directly. Before this fix, an agent could
+    call e.g. run_tests(repo_dir="/etc") directly and gate.py would
+    happily mount or scan it.
+
+    Two distinct checks, for two distinct meanings of repo_dir:
+    - sandbox_copy(): repo_dir is an ORIGINAL SOURCE path — reuses
+      validate_repo_ref() (ALLOWED_REPO_ROOTS), the same check already
+      applied at the API/orchestrator layer.
+    - Everything else: repo_dir is a SANDBOX path (already-copied,
+      already-isolated) — a looser "must resolve under the OS temp
+      directory" check, since requiring exact ALLOWED_REPO_ROOTS
+      membership here would reject sandbox_copy()'s own legitimate output
+      (which lives in /tmp, not wherever the original source repos are
+      configured to live).
+    """
+
+    def test_sandbox_copy_rejects_arbitrary_host_path_without_allowlist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-closed default: with no ALLOWED_REPO_ROOTS configured at
+        all, sandbox_copy must reject everything, not silently allow it."""
+        import core.path_safety as path_safety_module
+        monkeypatch.setattr(
+            path_safety_module, "settings", _settings_with(ALLOWED_REPO_ROOTS="")
+        )
+        with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS"):
+            sandbox_copy("/etc")
+
+    def test_sandbox_copy_rejects_path_outside_allowlist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The actual reported vulnerability: an agent calling
+        sandbox_copy directly with a host path like /etc, unrelated to
+        whatever repo the debate is actually about."""
+        import core.path_safety as path_safety_module
+        allowed = tmp_path / "allowed_repos"
+        allowed.mkdir()
+        monkeypatch.setattr(
+            path_safety_module,
+            "settings",
+            _settings_with(ALLOWED_REPO_ROOTS=str(allowed)),
+        )
+        with pytest.raises(ValueError):
+            sandbox_copy("/etc")
+
+    @pytest.mark.parametrize(
+        "bad_repo_dir",
+        ["/etc", "/home", "/root", "/", "/var/lib"],
+    )
+    def test_scan_functions_reject_paths_outside_temp_dir(
+        self, bad_repo_dir: str
+    ) -> None:
+        """The other half of the same finding: run_linter/run_type_check/
+        run_tests/run_security_scan/write_candidate_test/
+        run_candidate_test must all refuse to operate on a repo_dir that
+        isn't a sandbox path, independent of sandbox_copy's own
+        ALLOWED_REPO_ROOTS check (an agent can call these directly
+        without ever having called sandbox_copy first)."""
+        for fn, kwargs in [
+            (run_linter, {}),
+            (run_type_check, {}),
+            (run_tests, {}),
+            (run_security_scan, {}),
+        ]:
+            result = fn(bad_repo_dir, **kwargs)
+            assert result["passed"] is False
+            assert "temp directory" in result["detail"]
+
+        write_result = write_candidate_test(bad_repo_dir, "x.py", "content")
+        assert "error" in write_result
+        assert "temp directory" in write_result["error"]
+
+        run_candidate_result = run_candidate_test(bad_repo_dir, "x.py")
+        assert run_candidate_result["passed"] is False
+        assert "temp directory" in run_candidate_result["detail"]
+
+    def test_scan_functions_still_accept_legitimate_sandbox_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Backward compatibility: a genuine tmp_path-style fixture (or
+        real sandbox_copy() output) must not be rejected by the new
+        check — only paths outside the OS temp directory should be."""
+        repo = _make_clean_repo(tmp_path)
+        result = run_linter(str(repo))
+        assert result["passed"] is True
+
+    def test_full_gate_rejects_arbitrary_host_path(self) -> None:
+        """run_full_gate aggregates the four checks — confirm the
+        rejection propagates through and the overall gate correctly
+        reports failure rather than silently scanning /etc."""
+        result = run_full_gate("/etc")
+        assert result["passed"] is False
+        for check in result["checks"]:
+            assert check["passed"] is False
 
 
 class TestRunLinter:

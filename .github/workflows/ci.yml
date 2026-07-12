@@ -64,6 +64,9 @@ jobs:
       - name: Eval — path safety (repo_ref allowlist, target_file denylist)
         run: pytest evals/eval_path_safety.py -v
 
+      - name: Eval — storage/db (zombie-session sweeper)
+        run: pytest evals/eval_storage_db.py -v
+
       # ── Integration tests (require GOOGLE_API_KEY) ────────
       - name: Eval — reviewer (integration)
         # A step's own `env:` block is not available to that same step's

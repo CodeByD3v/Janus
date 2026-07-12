@@ -168,6 +168,20 @@ class Settings:
     WORKER_MAX_CONCURRENT: int = field(
         default_factory=lambda: _optional_int("WORKER_MAX_CONCURRENT", 4)
     )
+    # A DebateSession stuck in status='running' with no activity (see
+    # storage.db.sweep_zombie_sessions's docstring for exactly what
+    # "activity" means) for longer than this is assumed to be a zombie
+    # left behind by a crashed worker process, and is marked 'error'.
+    ZOMBIE_SESSION_TIMEOUT_MINUTES: int = field(
+        default_factory=lambda: _optional_int("ZOMBIE_SESSION_TIMEOUT_MINUTES", 30)
+    )
+    # How often the sweep runs, in seconds. Deliberately much less
+    # frequent than WORKER_POLL_INTERVAL — this is a periodic
+    # housekeeping pass over (usually zero) stuck sessions, not something
+    # that needs to run every single poll cycle.
+    ZOMBIE_SWEEP_INTERVAL_SECONDS: int = field(
+        default_factory=lambda: _optional_int("ZOMBIE_SWEEP_INTERVAL_SECONDS", 300)
+    )
 
     # --- Observability ---
     LOG_LEVEL: str = field(default_factory=lambda: _optional("LOG_LEVEL", "INFO"))

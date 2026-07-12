@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Generator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import create_engine, text
@@ -170,6 +170,116 @@ def claim_queued_session(worker_id: str) -> Optional[str]:
         return None
     finally:
         session.close()
+
+
+def _ensure_aware_utc(dt: datetime | None) -> datetime | None:
+    """Normalize a datetime to timezone-aware UTC.
+
+    SQLAlchemy's DateTime(timezone=True) columns (used throughout
+    storage/models.py) always WRITE timezone-aware UTC datetimes here,
+    but SQLite — this project's documented default for local dev, and
+    what this eval suite itself runs against — has no native
+    timezone-aware column type and hands them back NAIVE on read,
+    even though an aware datetime was stored. Comparing a naive value
+    against an aware one raises TypeError. This codebase never writes
+    anything but UTC, so a naive value read back is always assumed to
+    have been UTC. (Postgres does not have this gap — DateTime(timezone=
+    True) round-trips correctly there — but this normalization is a
+    no-op for an already-aware datetime, so it's safe to apply
+    unconditionally regardless of which database is in use.)
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def sweep_zombie_sessions(timeout_minutes: int) -> int:
+    """Find DebateSessions stuck in status='running' with no recent
+    activity and mark them 'error', freeing them from limbo.
+
+    Fixes a real, verified gap: if a worker process is killed outright
+    (OOM kill, SIGKILL, hardware failure) mid-debate, nothing in the
+    still-alive process gets a chance to run — worker.py's own
+    `except Exception` handler only catches exceptions within a process
+    that is still executing, not the process itself dying. Without this
+    sweep, such a session's status stays 'running' in the database
+    forever.
+
+    "No recent activity" means the more recent of:
+    - the session's own `updated_at` (touched at claim time and at
+      completion/error time, but NOT per round)
+    - its most recent Round's `created_at` (touched every round — see
+      orchestrator.py's per-round persistence)
+    Using only session.updated_at would misfire on a genuinely healthy,
+    long-running multi-round debate that just hasn't finished yet;
+    checking both avoids that false positive.
+
+    Deliberately marks swept sessions 'error' rather than resetting them
+    back to 'queued' for automatic retry: a worker crash can be caused by
+    something inherent to the debate itself (a pathological repo, a
+    memory-exhausting agent loop), and blindly re-queuing could retry the
+    same poisoned debate forever, crashing every worker that picks it up.
+    'error' surfaces the problem via GET /debates/{id} instead — visible
+    failure over silent infinite retry, consistent with how run_debate's
+    own exception handling already marks failures this way.
+
+    Returns the number of sessions swept.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)
+    swept = 0
+
+    session = _SessionFactory()
+    try:
+        running = (
+            session.query(DebateSession)
+            .filter(DebateSession.status == "running")
+            .all()
+        )
+        for debate in running:
+            last_round_at = _ensure_aware_utc(
+                max((r.created_at for r in debate.rounds if r.created_at), default=None)
+            )
+            last_activity = _ensure_aware_utc(debate.updated_at)
+            if last_round_at is not None and (
+                last_activity is None or last_round_at > last_activity
+            ):
+                last_activity = last_round_at
+
+            # A running session with no timestamp at all shouldn't be
+            # possible (claim_queued_session always sets updated_at) but
+            # treat it as immediately stale rather than crash or skip it
+            # silently if it somehow occurs.
+            is_stale = last_activity is None or last_activity < cutoff
+            if not is_stale:
+                continue
+
+            debate.status = "error"  # type: ignore[assignment]
+            debate.error_message = (  # type: ignore[assignment]
+                f"Swept by zombie-session sweeper: no activity for over "
+                f"{timeout_minutes} minutes (worker likely crashed)."
+            )
+            debate.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+            swept += 1
+            logger.warning(
+                "zombie_session_swept",
+                debate_id=debate.id,
+                last_activity=last_activity.isoformat() if last_activity else None,
+                timeout_minutes=timeout_minutes,
+            )
+
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.error("zombie_sweep_failed", exc_info=True)
+        return 0
+    finally:
+        session.close()
+
+    if swept:
+        logger.info("zombie_sweep_complete", swept_count=swept)
+    return swept
 
 
 def get_engine():

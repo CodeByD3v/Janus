@@ -23,6 +23,32 @@ fresh Docker container with:
 This prevents an adversarial or broken patch from escaping the sandbox.
 When Docker is unavailable (dev/CI), falls back to direct subprocess
 execution with only a wall-clock timeout.
+
+repo_dir validation (found during audit, still open at the time it was
+found — every function here is exposed directly as an MCP tool to the
+Patcher/Reviewer agents, see mcp_server/server.py, so an agent's own
+tool-call arguments reach these functions with NO validation from
+orchestrator.py in between; orchestrator.py's own defense-in-depth check
+via core.path_safety.validate_repo_ref only guards the ONE call it makes
+into sandbox_copy() itself, not any call an agent makes directly):
+
+- sandbox_copy(repo_dir): repo_dir here means an ORIGINAL SOURCE path —
+  the same concept api/schemas.py and orchestrator.py already gate
+  behind ALLOWED_REPO_ROOTS. Reuses that exact check (validate_repo_ref)
+  for consistency, so there is only ever one definition of "an allowed
+  source repo," not two that could silently drift apart.
+- Every other function here (run_linter, run_type_check, run_tests,
+  run_security_scan, run_full_gate, write_candidate_test,
+  run_candidate_test): repo_dir here means a SANDBOX path — output of
+  sandbox_copy(), already isolated. These use a looser but still real
+  check: repo_dir must resolve under the OS temp directory. This is
+  deliberately looser than requiring the exact "adv_review_sandbox_"
+  prefix sandbox_copy() uses, so it doesn't reject legitimate ad hoc temp
+  dirs (e.g. pytest's tmp_path fixture) while still fully closing the
+  actual reported vulnerability: an agent passing repo_dir="/etc",
+  "/home", or "C:\\Windows" directly to any of these tools, which none of
+  them checked before, and which none of these paths can ever resolve
+  under a temp directory.
 """
 
 from __future__ import annotations
@@ -34,8 +60,28 @@ from pathlib import Path
 
 from core.config import settings
 from core.observability import get_logger
+from core.path_safety import validate_repo_ref
 
 logger = get_logger(__name__)
+
+
+def _validate_sandbox_path(repo_dir: str) -> Path | None:
+    """repo_dir must resolve under the OS temp directory. Returns the
+    resolved Path if valid, None otherwise.
+
+    See this module's docstring for why this check (rather than
+    validate_repo_ref's ALLOWED_REPO_ROOTS allowlist) is the right one
+    for every function here except sandbox_copy — these operate on
+    already-sandboxed paths, not original source repos.
+    """
+    try:
+        candidate = Path(repo_dir).resolve()
+    except (OSError, RuntimeError):
+        return None
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    if not candidate.is_relative_to(temp_root):
+        return None
+    return candidate
 
 
 def _is_docker_available() -> bool:
@@ -125,7 +171,16 @@ def _run(cmd: list[str], cwd: Path, timeout: int = 60) -> tuple[int, str]:
 
 def sandbox_copy(repo_dir: str) -> Path:
     """Copy the repo into an isolated temp dir so agent-proposed edits
-    never touch the real working tree until they pass the gate."""
+    never touch the real working tree until they pass the gate.
+
+    Validates repo_dir against ALLOWED_REPO_ROOTS (same check
+    orchestrator.py and api/schemas.py already apply) before touching the
+    filesystem — this function is exposed directly as an MCP tool an
+    agent can call with an arbitrary argument, independent of whatever
+    orchestrator.py validated on its own call path. Raises ValueError on
+    an invalid repo_dir, matching validate_repo_ref's own contract.
+    """
+    validate_repo_ref(repo_dir)
     tmp = Path(tempfile.mkdtemp(prefix="adv_review_sandbox_"))
     shutil.copytree(repo_dir, tmp, dirs_exist_ok=True)
     logger.info("sandbox_created", source=repo_dir, sandbox=str(tmp))
@@ -167,6 +222,16 @@ def run_linter(repo_dir: str, target_file: str | None = None) -> dict:
     specifically. run_tests is deliberately NOT scoped this way — see
     its own docstring for why.
     """
+    if _validate_sandbox_path(repo_dir) is None:
+        return {
+            "check": "linter",
+            "passed": False,
+            "detail": (
+                "repo_dir does not resolve under the OS temp directory — "
+                "refusing to scan. This must be a sandbox path returned by "
+                "sandbox_copy(), not an arbitrary filesystem path."
+            ),
+        }
     if target_file:
         target = _resolve_scoped_path(repo_dir, target_file)
         if target is None:
@@ -206,6 +271,16 @@ def run_type_check(repo_dir: str, target_file: str | None = None) -> dict:
     correctly suppresses while still catching a real type error
     deliberately introduced directly into _hooks.py itself in testing.
     """
+    if _validate_sandbox_path(repo_dir) is None:
+        return {
+            "check": "type_check",
+            "passed": False,
+            "detail": (
+                "repo_dir does not resolve under the OS temp directory — "
+                "refusing to scan. This must be a sandbox path returned by "
+                "sandbox_copy(), not an arbitrary filesystem path."
+            ),
+        }
     if target_file:
         target = _resolve_scoped_path(repo_dir, target_file)
         if target is None:
@@ -255,6 +330,16 @@ def run_tests(repo_dir: str) -> dict:
     run of the unpatched repo, a materially different (and pricier)
     mechanism than scoping, and remains open.
     """
+    if _validate_sandbox_path(repo_dir) is None:
+        return {
+            "check": "tests",
+            "passed": False,
+            "detail": (
+                "repo_dir does not resolve under the OS temp directory — "
+                "refusing to scan. This must be a sandbox path returned by "
+                "sandbox_copy(), not an arbitrary filesystem path."
+            ),
+        }
     code, out = _run(["pytest", "-q"], cwd=Path(repo_dir))
     return {"check": "tests", "passed": code == 0, "detail": out or "clean"}
 
@@ -262,6 +347,16 @@ def run_tests(repo_dir: str) -> dict:
 def run_security_scan(repo_dir: str, target_file: str | None = None) -> dict:
     """Run bandit. Scoped to target_file when given — see run_linter's
     docstring for why this scoping is sound, not just convenient."""
+    if _validate_sandbox_path(repo_dir) is None:
+        return {
+            "check": "security_scan",
+            "passed": False,
+            "detail": (
+                "repo_dir does not resolve under the OS temp directory — "
+                "refusing to scan. This must be a sandbox path returned by "
+                "sandbox_copy(), not an arbitrary filesystem path."
+            ),
+        }
     if target_file:
         target = _resolve_scoped_path(repo_dir, target_file)
         if target is None:
@@ -339,6 +434,14 @@ def write_candidate_test(repo_dir: str, filename: str, content: str) -> dict:
     restricts testpaths to `testing/` — a file written to `tests/` there
     never ran under a bare `pytest -q`, silently.
     """
+    if _validate_sandbox_path(repo_dir) is None:
+        return {
+            "error": (
+                "repo_dir does not resolve under the OS temp directory — "
+                "refusing to write. This must be a sandbox path returned "
+                "by sandbox_copy(), not an arbitrary filesystem path."
+            )
+        }
     target = _resolve_candidate_test_path(repo_dir, filename)
     if target is None:
         return {"error": "Path traversal denied: target must be inside the sandbox"}
@@ -369,6 +472,16 @@ def run_candidate_test(repo_dir: str, filename: str) -> dict:
     run_* functions, so it slots into the same reasoning/logging
     conventions the Reviewer already uses for run_tests/run_linter/etc.
     """
+    if _validate_sandbox_path(repo_dir) is None:
+        return {
+            "check": "candidate_test",
+            "passed": False,
+            "detail": (
+                "repo_dir does not resolve under the OS temp directory — "
+                "refusing to run. This must be a sandbox path returned by "
+                "sandbox_copy(), not an arbitrary filesystem path."
+            ),
+        }
     target = _resolve_candidate_test_path(repo_dir, filename)
     if target is None:
         return {

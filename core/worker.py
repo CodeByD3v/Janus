@@ -22,13 +22,12 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
-import time
 import uuid
 from datetime import datetime, timezone
 
 from core.config import settings
 from core.observability import get_logger
-from storage.db import claim_queued_session, get_session, run_migrations
+from storage.db import claim_queued_session, get_session, run_migrations, sweep_zombie_sessions
 from storage.models import DebateSession
 
 logger = get_logger(__name__)
@@ -50,7 +49,7 @@ class Worker:
         self.running = True
         self._active_tasks: set[asyncio.Task[None]] = set()
         self._semaphore = asyncio.Semaphore(settings.WORKER_MAX_CONCURRENT)
-        self._last_zombie_sweep: float = 0.0
+        self._last_sweep_at: datetime | None = None
 
     async def start(self) -> None:
         """Main worker loop. Polls for queued sessions and dispatches debates."""
@@ -62,6 +61,8 @@ class Worker:
             worker_id=self.worker_id,
             poll_interval=settings.WORKER_POLL_INTERVAL,
             max_concurrent=settings.WORKER_MAX_CONCURRENT,
+            zombie_timeout_minutes=settings.ZOMBIE_SESSION_TIMEOUT_MINUTES,
+            zombie_sweep_interval_seconds=settings.ZOMBIE_SWEEP_INTERVAL_SECONDS,
         )
 
         # Register signal handlers
@@ -72,13 +73,10 @@ class Worker:
         while self.running:
             try:
                 await self._poll_cycle()
-                
-                now = time.monotonic()
-                if now - self._last_zombie_sweep > 300:
-                    self._sweep_zombies()
-                    self._last_zombie_sweep = now
             except Exception:
                 logger.error("worker_poll_error", exc_info=True)
+
+            self._maybe_sweep_zombies()
 
             # Clean up completed tasks
             done = {t for t in self._active_tasks if t.done()}
@@ -102,6 +100,35 @@ class Worker:
 
         logger.info("worker_stopped", worker_id=self.worker_id)
 
+    def _maybe_sweep_zombies(self) -> None:
+        """Run the zombie-session sweep if ZOMBIE_SWEEP_INTERVAL_SECONDS
+        has elapsed since the last sweep (or this is the first cycle —
+        _last_sweep_at starts as None, so a worker that just restarted
+        after a crash cleans up any zombies from the PREVIOUS crash
+        immediately, rather than waiting a full interval first).
+
+        Deliberately synchronous (not awaited/run in an executor) — this
+        is a fast, infrequent DB query, not worth the complexity of
+        offloading from the event loop, and every other call in this
+        poll cycle (claim_queued_session, get_session) is already
+        synchronous DB access called directly from this same async
+        function.
+        """
+        now = datetime.now(timezone.utc)
+        if (
+            self._last_sweep_at is not None
+            and (now - self._last_sweep_at).total_seconds()
+            < settings.ZOMBIE_SWEEP_INTERVAL_SECONDS
+        ):
+            return
+
+        try:
+            sweep_zombie_sessions(settings.ZOMBIE_SESSION_TIMEOUT_MINUTES)
+        except Exception:
+            logger.error("zombie_sweep_error", exc_info=True)
+        finally:
+            self._last_sweep_at = now
+
     async def _poll_cycle(self) -> None:
         """Try to claim and start one debate."""
         if not self._semaphore._value:  # type: ignore[attr-defined]
@@ -119,29 +146,6 @@ class Worker:
 
         task = asyncio.create_task(self._run_debate(session_id))
         self._active_tasks.add(task)
-
-    def _sweep_zombies(self) -> None:
-        """Find debates that are stuck in 'running' for too long and mark them as error."""
-        from datetime import timedelta
-        
-        timeout_delta = timedelta(hours=2)
-        cutoff = datetime.now(timezone.utc) - timeout_delta
-        
-        try:
-            with get_session() as db:
-                zombies = db.query(DebateSession).filter(
-                    DebateSession.status == "running",
-                    DebateSession.updated_at < cutoff
-                ).all()
-                for z in zombies:
-                    logger.warning("sweeping_zombie_debate", debate_id=z.id, updated_at=z.updated_at.isoformat())
-                    z.status = "error"  # type: ignore[assignment]
-                    z.error_message = "Debate timed out or abandoned by a crashed worker."  # type: ignore[assignment]
-                    z.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
-                if zombies:
-                    db.commit()
-        except Exception as e:
-            logger.error("zombie_sweep_error", error=str(e))
 
     async def _run_debate(self, session_id: str) -> None:
         """Run a single debate, guarded by the concurrency semaphore."""

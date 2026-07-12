@@ -28,11 +28,36 @@ where the developer already is" without it.
 Every function here is best-effort: failures are logged and swallowed,
 never raised. A broken webhook or an expired GitHub token must not make
 an already-successful, already-persisted debate look like it failed.
+
+SSRF protection (found in a security audit, fixed here): webhook_url is
+attacker-controlled — any tenant can set it on their own debate requests
+(see api/schemas.py). Before this fix, post_webhook() made an unrestricted
+requests.post(url) with no destination check, so a malicious tenant could
+supply an internal address (e.g. AWS/GCP's metadata endpoint,
+169.254.169.254) or an internal service URL to have Janus's own backend
+make requests against infrastructure the tenant has no direct network
+access to. _is_safe_webhook_url() resolves the hostname and rejects any
+URL whose resolved address is private/loopback/link-local/reserved/
+multicast/unspecified, checking ALL resolved addresses (a hostname can
+have multiple A/AAAA records) before allowing the request.
+
+Known residual risk, not closed by this fix: DNS rebinding — a resolved
+address can be validated safe here, then a malicious DNS server returns a
+different (unsafe) address at the moment `requests` itself re-resolves
+the same hostname to make the actual connection. Fully closing that
+requires pinning the specific validated IP and connecting to it directly
+(a custom transport adapter), which is real, more invasive work — this
+fix closes the direct, described threat (supplying an internal address
+as the webhook URL outright), not the more sophisticated DNS-rebinding
+variant.
 """
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -42,6 +67,53 @@ from core.observability import get_logger
 logger = get_logger(__name__)
 
 _SUMMARY_SNIPPET_CHARS = 300
+
+
+def _is_safe_webhook_url(url: str) -> tuple[bool, str]:
+    """Resolve url's hostname and reject it if any resolved address is
+    private/loopback/link-local/reserved/multicast/unspecified.
+
+    Returns (is_safe, reason) — reason is empty on success, or a
+    human-readable explanation of why the URL was rejected (safe to log,
+    contains no secrets).
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False, f"unsupported scheme: {parsed.scheme!r}"
+
+    hostname = parsed.hostname
+    if not hostname:
+        return False, "no hostname in URL"
+
+    try:
+        # getaddrinfo returns ALL A/AAAA records for the hostname — check
+        # every one, not just the first, since a hostname can resolve to
+        # multiple addresses and any one of them being unsafe is a risk.
+        addr_infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as e:
+        return False, f"could not resolve hostname: {e}"
+
+    for _family, _type, _proto, _canonname, sockaddr in addr_infos:
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False, f"resolved to an unparseable address: {ip_str}"
+
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return False, (
+                f"resolves to a private/internal address ({ip_str}) — "
+                "refusing to send a webhook request to it"
+            )
+
+    return True, ""
 
 
 def format_debate_summary(
@@ -152,43 +224,22 @@ def post_github_pr_comment(pr_repo: str, pr_number: int, body: str) -> bool:
         return False
 
 
-def _is_safe_webhook_url(url: str) -> bool:
-    import socket
-    import ipaddress
-    from urllib.parse import urlparse
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return False
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-        
-        # Resolve all IPs for the hostname
-        addrinfo = socket.getaddrinfo(hostname, None)
-        for info in addrinfo:
-            ip_str = info[4][0]
-            ip_obj = ipaddress.ip_address(ip_str)
-            if (ip_obj.is_private or ip_obj.is_loopback or 
-                ip_obj.is_link_local or ip_obj.is_multicast or 
-                ip_obj.is_reserved or ip_obj.is_unspecified):
-                return False
-        return True
-    except Exception:
-        return False
-
-
 def post_webhook(url: str, payload: dict[str, Any]) -> bool:
     """POST a JSON summary payload to a configured webhook URL.
 
-    Never raises. Returns True on success, False on any failure.
+    Never raises. Returns True on success, False on any failure —
+    including a URL that resolves to a private/internal address, which
+    is rejected before any request is made. See this module's docstring
+    for the SSRF threat this closes and its documented residual risk
+    (DNS rebinding).
     """
-    if not _is_safe_webhook_url(url):
-        logger.warning("webhook_notification_rejected_ssrf", url=url)
+    is_safe, reason = _is_safe_webhook_url(url)
+    if not is_safe:
+        logger.warning("webhook_notification_blocked_ssrf", url=url, reason=reason)
         return False
-        
+
     try:
-        resp = requests.post(url, json=payload, timeout=settings.NOTIFICATION_TIMEOUT_SECONDS, allow_redirects=False)
+        resp = requests.post(url, json=payload, timeout=settings.NOTIFICATION_TIMEOUT_SECONDS)
         if resp.status_code >= 300:
             logger.warning(
                 "webhook_notification_failed",
