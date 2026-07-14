@@ -118,6 +118,16 @@ class Settings:
             "fix,bug,patch,issue,crash,regression,hotfix",
         )
     )
+    # Common test-directory naming conventions, checked in order — the
+    # first one that exists in the repo is used. Previously hardcoded to
+    # "tests" only, which silently found zero samples on any repo using
+    # a different (equally common) convention — verified concretely on a
+    # real external repo, pytest-dev/pluggy, which uses "testing".
+    REPO_CONTEXT_TEST_DIR_NAMES: str = field(
+        default_factory=lambda: _optional(
+            "REPO_CONTEXT_TEST_DIR_NAMES", "tests,testing,test"
+        )
+    )
 
     # --- Sandbox / Gate Execution ---
     SANDBOX_IMAGE: str = field(

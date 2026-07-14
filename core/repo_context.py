@@ -163,14 +163,37 @@ def _find_test_conventions(
     """Sample existing test files elsewhere in the repo, excluding any
     already covering target_file, so Reviewer-written counterexamples
     match this repo's testing conventions instead of an imported style.
+
+    Checks settings.REPO_CONTEXT_TEST_DIR_NAMES in order (default:
+    "tests", "testing", "test") and uses the first that exists.
+    Previously hardcoded to "tests" only, which silently returned zero
+    samples on any repo using a different convention — confirmed
+    concretely against a real external repo, pytest-dev/pluggy, which
+    uses "testing" and returned zero samples before this fix, despite
+    having 9 real test files.
+
+    Unrelated to, and does not change, gate.py's write_candidate_test/
+    run_candidate_test, which deliberately keep a fixed, predictable
+    "tests/" write location regardless of the repo's own convention —
+    that's a different concern (a location run_candidate_test can always
+    find by exact path) from this function's concern (sampling existing
+    style to inform what the Reviewer writes).
     """
     if max_samples is None:
         max_samples = settings.REPO_CONTEXT_MAX_TEST_SAMPLES
     if snippet_chars is None:
         snippet_chars = settings.REPO_CONTEXT_SNIPPET_CHARS
 
-    tests_dir = repo_dir / "tests"
-    if not tests_dir.exists():
+    dir_names = [
+        n.strip()
+        for n in settings.REPO_CONTEXT_TEST_DIR_NAMES.split(",")
+        if n.strip()
+    ]
+    tests_dir = next(
+        (repo_dir / name for name in dir_names if (repo_dir / name).exists()),
+        None,
+    )
+    if tests_dir is None:
         return []
 
     stem = Path(target_file).stem
