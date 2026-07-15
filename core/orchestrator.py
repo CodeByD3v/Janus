@@ -333,6 +333,62 @@ def _check_reviewer_wrote_test(
 # Persistence helpers
 # ---------------------------------------------------------------------------
 
+# Real, unresolved-until-now finding from live end-to-end testing (see
+# ROADMAP.md §2): _persist_session_end was observed to not complete within
+# the full worker process after a real (failing) LLM call sequence,
+# despite completing correctly and quickly in isolation. The three
+# _persist_* functions below are synchronous, blocking DB calls, invoked
+# directly (unawaited, not offloaded) from inside async functions
+# (run_debate / _run_debate_inner) — a genuine issue independent of that
+# mystery: a blocking call inside an async function blocks the ENTIRE
+# event loop for its duration, which is bad practice regardless of whether
+# it ever actually hangs. This wrapper does two things at once:
+#   1. Runs the blocking call in a thread (asyncio.to_thread) so it never
+#      blocks the event loop even when it's fast.
+#   2. Applies a hard timeout, so if a persist call ever genuinely hangs
+#      (rather than raising quickly), that hang becomes a loud, logged
+#      asyncio.TimeoutError instead of a silent stall that leaves a
+#      session's true final state ambiguous — exactly what made the
+#      original finding hard to diagnose.
+# This does not, by itself, explain WHY a hang might occur — it bounds
+# the damage and makes the failure mode observable if it recurs.
+_PERSIST_TIMEOUT_SECONDS = 5.0
+
+
+async def _persist_with_timeout(
+    fn,
+    *args,
+    timeout: float = _PERSIST_TIMEOUT_SECONDS,
+    **kwargs,
+) -> bool:
+    """Run a synchronous persistence function in a thread, with a timeout.
+
+    Returns True on success. On timeout or any exception, logs clearly
+    and returns False rather than raising — a failed/slow persistence
+    call must not crash the whole debate; the caller already has its own
+    fallback behavior (e.g. run_debate returning a DebateResult even if
+    its final DB write didn't land).
+    """
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(fn, *args, **kwargs), timeout=timeout
+        )
+        return True
+    except asyncio.TimeoutError:
+        logger.error(
+            "persist_call_timed_out",
+            function=getattr(fn, "__name__", repr(fn)),
+            timeout_seconds=timeout,
+        )
+        return False
+    except Exception:
+        logger.error(
+            "persist_call_failed",
+            function=getattr(fn, "__name__", repr(fn)),
+            exc_info=True,
+        )
+        return False
+
 
 def _persist_session_start(
     debate_id: str,
@@ -489,12 +545,12 @@ async def run_debate(
     except ValueError as e:
         error_msg = f"repo_ref rejected: {e}"
         logger.error("debate_failed_repo_ref_validation", debate_id=debate_id, error=error_msg)
-        _persist_session_start(debate_id, repo_dir, target_file, ticket, tenant_id)
-        _persist_session_end(debate_id, False, {}, cost_tracker.to_dict(), None, error_msg)
+        await _persist_with_timeout(_persist_session_start, debate_id, repo_dir, target_file, ticket, tenant_id)
+        await _persist_with_timeout(_persist_session_end, debate_id, False, {}, cost_tracker.to_dict(), None, error_msg)
         return DebateResult(merged=False, sandbox_path=None)
 
     # Persist session start
-    _persist_session_start(debate_id, repo_dir, target_file, ticket, tenant_id)
+    await _persist_with_timeout(_persist_session_start, debate_id, repo_dir, target_file, ticket, tenant_id)
 
 
     sandbox = sandbox_copy(repo_dir)
@@ -525,7 +581,7 @@ async def _run_debate_inner(
     if not target_path.is_relative_to(sandbox_resolved):
         error_msg = f"Path traversal denied: {target_file} is outside the sandbox"
         logger.error("debate_failed_path_traversal", debate_id=debate_id, error=error_msg)
-        _persist_session_end(debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), error_msg)
+        await _persist_with_timeout(_persist_session_end, debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), error_msg)
         return DebateResult(merged=False, sandbox_path=str(sandbox))
 
     try:
@@ -533,7 +589,7 @@ async def _run_debate_inner(
     except Exception as e:
         error_msg = f"Failed to read target file: {e}"
         logger.error("debate_failed_read_target", debate_id=debate_id, error=error_msg)
-        _persist_session_end(debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), error_msg)
+        await _persist_with_timeout(_persist_session_end, debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), error_msg)
         return DebateResult(merged=False, sandbox_path=str(sandbox))
 
     patcher_agent, patcher_key_index = build_patcher()
@@ -579,21 +635,23 @@ async def _run_debate_inner(
         )
     except RuntimeError as e:
         logger.error("debate_failed_initial_patch", debate_id=debate_id, error=str(e))
-        try:
-            _persist_session_end(debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), str(e))
-        except Exception:
-            # A real, unresolved finding from live end-to-end testing (see
-            # AGENTS.md/known limits): in isolation, _persist_session_end
-            # completes correctly and quickly. In the full worker process,
-            # after a real (failing) LLM call sequence involving the MCP
-            # subprocess, this call was observed to not complete within
-            # 100+ seconds in a sandboxed test environment with its own
-            # process-lifecycle constraints — cause not yet isolated.
-            # Logging instead of silently losing the failure either way.
+        # Previously a bare synchronous call wrapped in try/except as a
+        # stopgap after this exact live finding (see ROADMAP.md §2) — now
+        # goes through _persist_with_timeout, which offloads the blocking
+        # DB call to a thread and bounds it with a hard timeout, so a hang
+        # here becomes a loud, logged persist_call_timed_out instead of a
+        # silent stall with an ambiguous final debate state.
+        persisted = await _persist_with_timeout(
+            _persist_session_end, debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), str(e)
+        )
+        if not persisted:
             logger.error(
-                "persist_session_end_failed_after_initial_patch",
+                "debate_final_state_not_persisted",
                 debate_id=debate_id,
-                exc_info=True,
+                detail="Initial patch failed and the failure state could not be "
+                       "persisted — see persist_call_timed_out/persist_call_failed "
+                       "above. sweep_zombie_sessions will eventually recover this "
+                       "session if it's left stuck in 'running'.",
             )
         return result
 
@@ -729,7 +787,7 @@ async def _run_debate_inner(
         result.rounds.append(round_log)
 
         # Persist round immediately (survives crashes)
-        _persist_round(debate_id, round_log)
+        await _persist_with_timeout(_persist_round, debate_id, round_log)
 
         if stop_reason:
             logger.info(
@@ -789,13 +847,24 @@ async def _run_debate_inner(
         metrics.debates_rejected.inc()
 
     # Persist final state
-    _persist_session_end(
+    persisted = await _persist_with_timeout(
+        _persist_session_end,
         debate_id,
         result.merged,
         final_gate,
         cost_tracker.to_dict(),
         str(sandbox),
     )
+    if not persisted:
+        logger.error(
+            "debate_final_state_not_persisted",
+            debate_id=debate_id,
+            merged=result.merged,
+            detail="A successfully completed debate's final state could not be "
+                   "persisted — see persist_call_timed_out/persist_call_failed "
+                   "above. sweep_zombie_sessions will eventually recover this "
+                   "session if it's left stuck in 'running'.",
+        )
 
     logger.info(
         "debate_completed",

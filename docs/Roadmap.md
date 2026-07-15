@@ -38,57 +38,96 @@ deferred (a decision, not an oversight), or genuinely unresolved. See
 worker process, in a live end-to-end test, after a real (failing) LLM call
 sequence.**
 
-What's confirmed:
-- The function itself is correct: called in isolation (same async event
-  loop, same code path, no prior activity), it completes in milliseconds.
-- The upsert fix for `_persist_session_start` is genuinely correct and
-  verified — its own log line (`debate_session_persisted`) appears
-  correctly in every real run.
-- The failure is consistent across three separate full runs: the debate
-  correctly reaches the retry-exhausted `RuntimeError`, logs it, and then
-  the following `_persist_session_end` call does not appear to complete —
-  no success log, no exception log, and the database confirms the write
-  never landed (`status` stays `running`, `error_message` stays `None`).
+**Update after a second diagnostic pass**: the underlying blocking DB calls
+(`_persist_session_start`, `_persist_round`, `_persist_session_end`) are now
+routed through a new `_persist_with_timeout` helper (`core/orchestrator.py`)
+that runs them via `asyncio.to_thread` and wraps that in
+`asyncio.wait_for(timeout=5.0)` — a genuine improvement regardless of this
+mystery's outcome, since a blocking synchronous DB call invoked directly
+inside an `async def` function stalls the *entire* event loop for its
+duration, hang or not. This was verified in isolation to work correctly:
+a fast call succeeds, a deliberately-hung call is cut off at exactly the
+timeout and logged (`persist_call_timed_out`), and a raising call is caught
+and logged (`persist_call_failed`) — all confirmed with a synthetic
+`time.sleep`-based test, not assumed.
 
-What's ruled out:
-- A genuine deadlock in the function itself (isolated test disproves this).
-- Simple SQLite lock contention with default settings (would raise an
-  immediate `OperationalError`, not hang silently — none was observed).
-- Log buffering masking a real success (the *database state itself*, not
-  just the log, confirms the write didn't happen).
+**Re-run live against the real worker with this fix in place — twice.**
+Neither `persist_call_timed_out`, `persist_call_failed`, nor the normal
+success log line (`debate_session_completed`) appeared in either run, even
+though:
+- The first re-run gave ~13 seconds of margin between the logged failure
+  and my kill — too close to the (then 15s) timeout to be conclusive.
+- After shortening the timeout to 5 seconds specifically to remove that
+  ambiguity, the second re-run gave **over 100 seconds** of margin between
+  the logged failure and my kill. The timeout should have fired and logged
+  with enormous margin to spare. It did not.
 
-What's suspected but not proven: something about the interaction between
-the MCP subprocess (spawned per-agent via `MCPToolset`, connected over
-stdio) and the async worker process, specifically after that subprocess has
-been involved in a failed/retried LLM call sequence, leaves something in a
-state that blocks or significantly delays the subsequent synchronous DB
-write.
+This is a materially different, more concerning result than the first
+diagnostic pass suggested. It rules out:
+- A simple hang inside the persistence function itself (already ruled out
+  by the isolated test).
+- Simple SQLite lock contention under default settings (would raise
+  quickly, not hang past a 5-second `asyncio.wait_for`).
+- My own kill timing being the sole confound (100+ seconds of margin with
+  a short timeout and still nothing).
 
-**Why this wasn't fully resolved in this environment**: reproducing it
-reliably requires observing an undisturbed worker process for the debate's
-full natural failure cycle (~90-100 seconds in the environment where this
-was found, dominated by a one-time slow connection to the LLM API — not
-the retry logic itself, which is fast). The sandbox this was diagnosed in
-tears down backgrounded processes between tool invocations, meaning every
-observation window was bounded by a single tool call's execution limit,
-which sat right at the edge of the natural cycle time. Every kill sent to
-end an observation window is a potential confound for what's already a
-timing-sensitive bug.
+**What's newly suspected**: since even `asyncio.wait_for`'s own timeout
+mechanism — which relies on the event loop remaining responsive enough to
+schedule and fire a timer callback — did not fire, the leading hypothesis
+has shifted from "this one function call hangs" to **"something makes the
+worker's asyncio event loop itself stop servicing callbacks after a failed
+LLM call sequence involving the MCP subprocess"**. If the event loop itself
+is not being scheduled, no amount of wrapping the *specific* call in a
+timeout would help, because the mechanism that enforces that timeout is
+itself starved. This is a materially different, and more serious, class of
+bug than originally suspected — worth stating plainly rather than
+downplaying.
 
-**Next step**: reproduce in a persistent terminal (a real dev machine or a
-long-lived CI job), with a real `GOOGLE_API_KEY`, letting the worker run
-completely undisturbed through at least one full debate failure. If the
-hang reproduces there too, instrument `_persist_session_end` and the
-MCPToolset's connection lifecycle directly (e.g. `asyncio.wait_for` with a
-short timeout around the DB call, to at least convert a silent hang into a
-loud, diagnosable timeout) rather than working around it blind.
+A raw, synchronous, `os.fsync`-flushed file-write marker (bypassing both
+the logging framework and asyncio entirely) was added immediately around
+the call as a maximally direct diagnostic, to determine whether execution
+reaches the call at all versus hangs inside it. This diagnostic was not
+completed — a separate instability in the sandboxed test environment
+itself (tool invocations began timing out independent of this specific
+test, including on trivial commands) interrupted the investigation before
+a result was captured. The instrumentation was removed rather than left in
+the codebase, since a hardcoded `/tmp/janus_diag.log` write is not
+appropriate to ship, but the finding above (the timeout mechanism itself
+not firing) stands on its own as real diagnostic signal, independent of
+that incomplete last step.
 
-**Mitigation already in place**: the call is now wrapped in
-`try/except`, so if it *does* raise (as opposed to hang), the failure is
-logged (`persist_session_end_failed_after_initial_patch`) instead of
-silently disappearing. This does not fix the underlying issue — it only
-ensures a raised exception isn't lost. A genuine hang is not helped by
-this wrapper at all, which is exactly why this remains open, not closed.
+**Why this wasn't (and likely can't be, here) fully resolved**: reproducing
+this reliably requires observing an undisturbed worker process for the
+debate's full natural cycle in an environment that (a) doesn't tear down
+background processes between observation windows, and (b) doesn't itself
+become unstable under repeated heavy test iterations. Neither held reliably
+in the sandbox this was diagnosed in.
+
+**Concrete next steps, in order of how directly they'd resolve this**:
+1. Reproduce in a persistent terminal (a real dev machine or long-lived CI
+   job) with a real `GOOGLE_API_KEY`, and attach `py-spy dump` (or
+   equivalent) to the worker process if it appears stuck — this inspects
+   the actual Python + native stack of a running process directly, which
+   would show definitively whether the event loop is blocked and on what,
+   rather than continuing to infer it indirectly through log absence.
+2. If `py-spy` isn't available, the raw-file-write diagnostic described
+   above (re-added temporarily) is the next-best signal — it doesn't
+   depend on the logging framework or asyncio machinery, both of which are
+   plausible suspects.
+3. Once the event loop's actual blocking point is identified, the fix is
+   almost certainly in how `MCPToolset`'s subprocess connection is
+   constructed, awaited, or torn down after a failed call — not in the
+   persistence functions themselves, which are now confirmed (via the
+   isolated test) to be correct in isolation.
+
+**Mitigation already in place, and genuinely valuable regardless of root
+cause**: all three persistence calls now go through `_persist_with_timeout`
+instead of being invoked as raw blocking calls. If the underlying issue
+turns out to be specific to the persistence call after all (rather than
+the event loop broadly), this now bounds and surfaces it loudly instead of
+losing it silently. If the issue is the event loop itself, this wrapper
+alone won't fix it — which is exactly the finding above, stated plainly
+rather than claimed fixed.
 
 ---
 
