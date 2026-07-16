@@ -49,6 +49,7 @@ from google.genai import types as genai_types
 
 from core.agents import build_patcher, build_reviewer
 from core.config import settings
+from core import diagnostics
 from core.gate import run_full_gate, sandbox_copy
 from core.llm_client import get_key_pool, is_rate_limit_error
 from core.observability import CostTracker, LLMCallStats, get_logger, metrics
@@ -592,8 +593,10 @@ async def _run_debate_inner(
         await _persist_with_timeout(_persist_session_end, debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), error_msg)
         return DebateResult(merged=False, sandbox_path=str(sandbox))
 
+    diagnostics.trace("before_build_patcher", debate_id=debate_id)
     patcher_agent, patcher_key_index = build_patcher()
     patcher_runner = InMemoryRunner(agent=patcher_agent, app_name=settings.APP_NAME)
+    diagnostics.trace("after_build_patcher", debate_id=debate_id)
 
     user_id = "service_account"
     patcher_session = str(uuid.uuid4())
@@ -623,6 +626,7 @@ async def _run_debate_inner(
         f"Propose your patch as a full replacement file."
     )
 
+    diagnostics.trace("before_initial_ask", debate_id=debate_id)
     try:
         patch_text, patcher_runner, patcher_session, patcher_key_index = await _ask(
             patcher_runner,
@@ -633,7 +637,9 @@ async def _run_debate_inner(
             key_index=patcher_key_index,
             rebuild_on_rate_limit=_rebuild_patcher,
         )
+        diagnostics.trace("after_initial_ask_success", debate_id=debate_id)
     except RuntimeError as e:
+        diagnostics.trace("initial_ask_raised_runtimeerror", debate_id=debate_id, error=str(e)[:200])
         logger.error("debate_failed_initial_patch", debate_id=debate_id, error=str(e))
         # Previously a bare synchronous call wrapped in try/except as a
         # stopgap after this exact live finding (see ROADMAP.md §2) — now
@@ -641,9 +647,11 @@ async def _run_debate_inner(
         # DB call to a thread and bounds it with a hard timeout, so a hang
         # here becomes a loud, logged persist_call_timed_out instead of a
         # silent stall with an ambiguous final debate state.
+        diagnostics.trace("before_persist_with_timeout", debate_id=debate_id)
         persisted = await _persist_with_timeout(
             _persist_session_end, debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), str(e)
         )
+        diagnostics.trace("after_persist_with_timeout", debate_id=debate_id, persisted=persisted)
         if not persisted:
             logger.error(
                 "debate_final_state_not_persisted",

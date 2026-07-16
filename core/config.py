@@ -200,6 +200,32 @@ class Settings:
             _optional("METRICS_ENABLED", "true").lower() in ("true", "1", "yes")
         )
     )
+    # Off by default. See ROADMAP.md §2 — a real, unresolved finding where
+    # a persistence call appeared to not complete within the full worker
+    # process after a failed LLM call sequence, and even
+    # asyncio.wait_for's own timeout mechanism did not fire, suggesting
+    # the event loop itself may stop servicing callbacks in that
+    # scenario. When enabled, writes raw, synchronous, immediately-
+    # fsync'd trace lines around persistence calls to
+    # DIAGNOSTIC_PERSIST_TRACE_PATH, bypassing the logging framework and
+    # asyncio entirely — deliberately the most primitive possible
+    # instrumentation, so it still produces a signal even if the
+    # suspected event-loop issue would otherwise prevent normal logging
+    # from being observed. Meant to be turned on only while actively
+    # reproducing that specific issue, in a persistent terminal — not for
+    # routine use, and not equivalent to a stack-level tool like py-spy
+    # (see scripts/reproduce_persist_hang.sh), but useful as a first,
+    # zero-dependency signal.
+    DIAGNOSTIC_PERSIST_TRACE: bool = field(
+        default_factory=lambda: (
+            _optional("DIAGNOSTIC_PERSIST_TRACE", "false").lower() in ("true", "1", "yes")
+        )
+    )
+    DIAGNOSTIC_PERSIST_TRACE_PATH: str = field(
+        default_factory=lambda: _optional(
+            "DIAGNOSTIC_PERSIST_TRACE_PATH", "/tmp/janus_persist_trace.log"
+        )
+    )
 
     # --- Notifications (GAP 17) ---
     # All optional — a debate with no PR reference and no webhook configured

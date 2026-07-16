@@ -120,6 +120,13 @@ in the sandbox this was diagnosed in.
    persistence functions themselves, which are now confirmed (via the
    isolated test) to be correct in isolation.
 
+**Ready-to-run reproduction script**: `scripts/reproduce_s2.py` automates
+the full reproduction sequence — starts the API, enqueues a debate against
+`demo_repo`, starts a worker subprocess, streams all logs, watches for the
+specific §2 log events, and prints the exact `py-spy dump` command with
+the worker PID if the debate appears stuck. See `scripts/README_reproduce_s2.md`
+for usage.
+
 **Mitigation already in place, and genuinely valuable regardless of root
 cause**: all three persistence calls now go through `_persist_with_timeout`
 instead of being invoked as raw blocking calls. If the underlying issue
