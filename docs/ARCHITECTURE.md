@@ -1,4 +1,4 @@
-# Janus — Architecture
+# Janus 2.0 — Architecture
 
 This document describes how Janus is actually built, as of this revision — not
 the aspirational version. Where something is a known gap or an open question
@@ -9,15 +9,11 @@ deliberately deferred and why.
 
 ## 1. What Janus is
 
-Janus runs adversarial code-review debates between two LLM agents — a
-**Patcher** that proposes a fix, and a **Reviewer** that tries to disprove it —
-refereed by a **deterministic gate** (lint, type check, tests, security scan)
-that is the only thing with actual merge authority. Neither agent can merge
-its own work; the gate's verdict is final.
+Janus is a **language-agnostic, adversarial code-review engine**. The moat of the product is the debate loop itself, not the underlying linters or type checkers. It sits on top of standard CI pipelines, augmenting them with deep semantic review. 
 
-The system is a REST API + background worker, not a CLI or a bot. Clients
-enqueue a debate via `POST /debates` and poll `GET /debates/{id}` (or receive
-a webhook / PR comment) for the result.
+It runs an adversarial code-review debate between two LLM agents — a **Reviewer** that tries to disprove correctness, and a **Patcher** that proposes a fix. The debate is refereed by a **deterministic gate** (lint, type check, tests, security scan) that is the only thing with actual merge authority. Neither agent can merge its own work; the gate's verdict is final.
+
+The system is a REST API + background worker, not a CLI or a bot. Clients enqueue a debate via `POST /debates` and poll `GET /debates/{id}` (or receive a webhook / PR comment) for the result.
 
 ---
 
@@ -38,7 +34,9 @@ Client                API                  DB              Worker
   │                    │                    │<─────────────────┤
   │                    │                    │                 │  sandbox_copy()
   │                    │                    │                 │  run_debate()
-  │                    │                    │   per-round      │  ├─ Patcher patches
+  │                    │                    │                 │  ├─ Reviewer reviews
+  │                    │                    │                 │  ├─ PASS / INCONCLUSIVE? Stop.
+  │                    │                    │   per-round      │  ├─ ISSUE_FOUND? Patcher patches
   │                    │                    │   UPDATE/INSERT  │  ├─ Reviewer critiques
   │                    │                    │<─────────────────┤  ├─ gate checks
   │                    │                    │                 │  └─ repeat or stop
@@ -70,27 +68,29 @@ adversarial_code_review/
 │   ├── schemas.py           Request/response models + validation
 │   │                       (repo_ref allowlist, target_file denylist,
 │   │                       pr_repo/pr_number/webhook_url cross-validation)
-│   └── auth.py              API-key → tenant_id resolution, rate limiting
+│   ├── auth.py              API-key → tenant_id resolution, rate limiting
+│   └── github_app.py        GitHub App webhook handler (Phase 6)
 │
 ├── core/
-│   ├── orchestrator.py       The debate loop itself (run_debate)
-│   ├── agents.py             Patcher/Reviewer agent construction,
-│   │                       instructions, MCP tool_filters
+│   ├── orchestrator.py       The debate loop itself (Reviewer-first flow)
+│   ├── agents.py             Language-agnostic prompt templates, {language} injection
 │   ├── gate.py               Deterministic checks: lint, type check, tests,
 │   │                       security scan, sandbox lifecycle, container
-│   │                       isolation, path validation
+│   │                       isolation, path validation (delegates to ValidationRunner)
+│   ├── validation.py         Generic ValidationRunner, CheckResult, ValidationResult
+│   ├── repo_config.py        janus.yaml loader and RepoConfig dataclass
+│   ├── language.py           Language detection from file extensions
 │   ├── retrieval.py          Behavioral retrieval — "what does a real catch
 │   │                       look like" (ChromaDB + sentence-transformers)
 │   ├── repo_context.py       Repository-context retrieval — "what does THIS
-│   │                       repo actually look like" (call graph, git
-│   │                       history, test conventions)
-│   ├── llm_client.py         Multi-API-key pool with round-robin + cooldown
+│   │                       repo actually look like", graceful non-Python degradation
+│   ├── llm_client.py         Multi-provider build_model() via LiteLLM
 │   ├── notifications.py      PR comments + webhooks, with SSRF protection
 │   ├── path_safety.py        repo_ref / target_file validation shared by
 │   │                       the API layer and the orchestrator
 │   ├── worker.py             Poll loop, concurrency control, zombie-session
 │   │                       sweeper, graceful shutdown
-│   ├── config.py             All settings, env-var driven, one place
+│   ├── config.py             ModelConfig, free-tier defaults, BYOK settings
 │   └── observability.py      Structured logging, metrics, cost tracking
 │
 ├── storage/
@@ -99,11 +99,7 @@ adversarial_code_review/
 │                             claim_queued_session, sweep_zombie_sessions
 │
 ├── mcp_server/
-│   └── server.py             Exposes gate.py's functions as MCP tools the
-│                             agents call directly (sandbox_copy, run_linter,
-│                             run_type_check, run_tests, run_security_scan,
-│                             run_full_gate, write_candidate_test,
-│                             run_candidate_test)
+│   └── server.py             Exposes generic validation tools via MCP
 │
 ├── retrieval_pipeline/
 │   ├── schema.py             Validated record shape for behavioral examples
@@ -127,7 +123,7 @@ adversarial_code_review/
 ## 4. The debate loop (`core/orchestrator.py`)
 
 `run_debate(repo_dir, target_file, ticket, debate_id=None, tenant_id=None)` is
-the core function. Structure:
+the core function. Janus 2.0 uses a **Reviewer-First** loop:
 
 1. **Validate `repo_dir`** against `ALLOWED_REPO_ROOTS` (`path_safety.validate_repo_ref`)
    — defense-in-depth; the API layer already validated this, but `run_debate`
@@ -137,11 +133,12 @@ the core function. Structure:
    sandbox, never the original.
 3. **Persist session start** (`_persist_session_start`) — an **upsert**, not
    an insert (see §9.3 for why this matters).
-4. **Patcher writes the initial patch.** The Patcher can only ever write to
-   `target_file` — there is no other write path in the whole function. This
-   single-file-write invariant is what makes gate-check *scoping* (§5.3)
-   semantically sound, not just a shortcut.
-5. **Round loop** (up to `MAX_ROUNDS`, default 5), each round:
+4. **Phase 1: Initial Review**. The Reviewer agent goes first. It inspects the code and outputs one of three verdicts:
+   - `PASS`: No issues found. The PR is approved. No Patcher runs.
+   - `ISSUE_FOUND`: Concrete issues are found. The Patcher is invoked.
+   - `INCONCLUSIVE`: The code is too complex or ambiguous. The PR is flagged for human review.
+5. **Phase 2: Patcher fixes**. If `ISSUE_FOUND`, the Patcher is invoked. The Patcher can only ever write to `target_file`.
+6. **Round loop** (up to `MAX_ROUNDS`, default 5), each round:
    - Retrieve behavioral examples (`retrieval.retrieve_examples`) and
      repository context (`repo_context.retrieve_repo_context`) — two
      independent sources (§6), re-fetched every round since the code under
@@ -156,16 +153,12 @@ the core function. Structure:
      checks (§5.3).
    - Persist the round (`_persist_round`) — every round, not just the final
      one, so an in-flight debate survives a crash without losing history.
-   - Detect two silent-failure modes and record them rather than let them
-     pass unnoticed: `code_extraction_failed` (Patcher's response had no
-     parseable code block) and `reviewer_skipped_counterexample` (Reviewer
-     gave prose critique but never wrote a test).
    - Stop if the Reviewer says "no further issues," or `MAX_ROUNDS` is hit.
    - Otherwise, the Patcher gets the critique and tries again.
-6. **Final gate run**, same scoping. `result.merged = final_gate["passed"]`
+7. **Phase 3: Final gate run**, same scoping. `result.merged = final_gate["passed"]`
    — the gate's verdict, not either agent's opinion, decides the outcome.
-7. **Persist session end** and fire notifications (§8) if configured.
-8. **`finally`: remove the sandbox.** This is a hard guarantee — wrapped
+8. **Persist session end** and fire notifications (§8) if configured.
+9. **`finally`: remove the sandbox.** This is a hard guarantee — wrapped
    around the *entire* debate body (`_run_debate_inner`), not scattered
    `rmtree` calls at each anticipated failure branch. Verified by forcing a
    completely unanticipated exception mid-debate and confirming cleanup
@@ -190,9 +183,9 @@ Every LLM call goes through `_ask()`, which layers:
 
 ---
 
-## 5. The gate (`core/gate.py`)
+## 5. The gate (`core/gate.py` & `core/validation.py`)
 
-The gate is the only thing with merge authority. Four checks:
+The gate is the only thing with merge authority. Validation is handled by a generic `ValidationRunner` driven by `janus.yaml`. The hardcoded checks below are now just **configurable defaults** that fallback if no `janus.yaml` is present:
 
 | Check | Tool | Scoped to `target_file`? |
 |---|---|---|
@@ -341,7 +334,7 @@ signals:
 
 Every signal degrades independently and silently on failure (unparseable
 code, no git history, no test directory) rather than failing the whole
-call — partial repo context is still better than none.
+call. **For non-Python repositories**, `repo_context.py` degrades gracefully without throwing errors.
 
 ---
 
@@ -401,6 +394,10 @@ still-in-progress multi-round debate by checking the more recent of the
 session's `updated_at` (only touched at claim/completion) or its latest
 round's `created_at` (touched every round).
 
+### 7.5 Fork PR security (untrusted by default)
+
+Fork PRs are untrusted by default. This ensures that arbitrary code submitted from external forks cannot execute within the sandbox or leverage the backend CI integrations unless explicitly allowed.
+
 ---
 
 ## 8. Notifications (`core/notifications.py`)
@@ -417,6 +414,7 @@ exist:
   `ROADMAP.md`).
 - **Webhook POST**, if `webhook_url` was provided (or `DEFAULT_WEBHOOK_URL`
   is configured server-side as a fallback).
+- *Future*: GitHub App integration (Phase 6) will enhance notifications and trigger modes.
 
 Every notification call is best-effort: failures are logged and swallowed,
 never raised. A broken webhook or an expired GitHub token must not make an
@@ -430,7 +428,7 @@ already-successful, already-persisted debate look like it failed.
 
 `DebateSession` — one row per debate: status (`queued`/`running`/`merged`/
 `rejected`/`error`), repo/target/ticket, tenant, PR/webhook fields, final
-gate result and cost as JSON, error message.
+gate result and cost as JSON, error message. *New fields in 2.0:* `reviewer_verdict` and `needs_human_review`.
 
 `Round` — one row per debate round: patch text, reviewer text, gate result,
 which behavioral examples and repo-context signals were retrieved,
@@ -525,8 +523,27 @@ Tracked in detail in `ROADMAP.md`. Summary:
   isolation. Root cause not yet isolated; the call is now wrapped so a
   persist failure is logged rather than silently lost, but this is not
   confirmed fixed.
-- **Deliberately deferred**: fine-tuning the Reviewer, an admin
-  dashboard, DNS-rebinding hardening on webhooks, baseline-diffing the
-  gate's test check (so pre-existing repo debt doesn't block unrelated
-  patches forever), and every non-REST-API integration surface (GitHub
-  App, CI/CD step, IDE extension, CLI).
+- **Roadmap Phases**: Phase 6 (GitHub App integration), Phase 7 (Auto-merge), and further hardening (DNS-rebinding hardening on webhooks, baseline-diffing the gate's test check, fine-tuning the Reviewer).
+
+---
+
+## 12. Multi-Provider LLM
+
+Janus 2.0 supports multi-provider model selection via **Bring Your Own Key (BYOK)**. 
+`core/llm_client.py` is extended to support Gemini (via the existing `_KeyedGemini`), and Claude/GPT/Groq via a LiteLLM wrapper. 
+
+- **Free Tier**: Uses Janus-managed models.
+- **Enterprise Tier**: Uses BYOK models.
+
+This flexibility ensures developers can choose their preferred reasoning engine.
+
+---
+
+## 13. janus.yaml Configuration
+
+Janus 2.0 introduces per-repo configuration through `janus.yaml`. This file configures:
+- **Validation Checks**: Define custom commands to run in the `ValidationRunner`.
+- **Trigger Mode**: Manual vs. automatic execution.
+- **LLM Config**: BYOK configurations for enterprise.
+- **Debate Settings**: Limits and rounds.
+- **Auto-Merge**: Opt-in feature for enterprise users.

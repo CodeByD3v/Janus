@@ -16,7 +16,7 @@ request will fail with a 422, because nothing has told the service that
 
 ## 1. Current status, in one paragraph
 
-Every core mechanism has been built and verified at the component level:
+The Janus 2.0 migration is underway. Every core mechanism has been built and verified at the component level:
 the REST API, the deterministic gate (with container isolation and correct
 check scoping), both retrieval systems, multi-key LLM pooling, the deploy
 pipeline, notifications, and several real security fixes (sandbox-escape
@@ -39,6 +39,7 @@ timeout around it didn't fire — see §7 below and `docs/Roadmap.md` §2.
 - A real Gemini API key (`GOOGLE_API_KEY`) to run an actual debate. Not
   needed to run the gate alone, the eval suite (minus `eval_reviewer.py`),
   or to enqueue/inspect debates via the API without a worker attached.
+- `janus.yaml` (optional, for custom validation checks).
 
 ---
 
@@ -61,6 +62,8 @@ export ALLOWED_REPO_ROOTS=/absolute/path/to/Janus   # needed for repo_ref to be 
 `ALLOWED_REPO_ROOTS` must be an absolute path (or comma-separated list of
 them) that the `repo_ref` you send actually resolves under. Pointing it at
 the repo root covers `demo_repo` and any other fixture inside it.
+
+Note: you can optionally provide a `janus.yaml` file in the repo root to configure custom validation checks.
 
 ---
 
@@ -176,6 +179,26 @@ wherever the worker process's current working directory is — if you're
 running the manual (non-Docker) setup from the repo root, `demo_repo` alone
 works as long as `ALLOWED_REPO_ROOTS` covers it (§3). If it doesn't
 resolve, pass an absolute path instead.
+
+### 4.6 Configuring janus.yaml for custom validation
+
+You can configure custom validation checks by placing a `janus.yaml` file in the repository root:
+
+```yaml
+# janus.yaml — placed in the repository root
+validation:
+  checks:
+    - name: lint
+      command: ruff check .
+    - name: typecheck
+      command: mypy --ignore-missing-imports .
+    - name: test
+      command: pytest -q
+    - name: security
+      command: bandit -q -r . -x ./tests
+```
+
+If no `janus.yaml` exists, the current Python defaults are used automatically.
 
 ---
 
@@ -332,6 +355,13 @@ why that distinction matters for this specific investigation.
 Grouped as in `core/config.py`. `—` means no default (empty string), not
 "unset."
 
+### Multi-Provider LLM (Janus 2.0)
+| Variable | Default | Notes |
+|---|---|---|
+| `JANUS_DEFAULT_PROVIDER` | `google` | Default LLM provider for free-tier users |
+| `JANUS_DEFAULT_MODEL` | `gemini-2.0-flash` | Default model for free-tier users |
+| `JANUS_CONFIG_PATH` | `janus.yaml` | Path to repo-level config file |
+
 ### LLM
 | Variable | Default | Notes |
 |---|---|---|
@@ -434,3 +464,5 @@ Grouped as in `core/config.py`. `—` means no default (empty string), not
 | Combined `pytest evals/` run collects 0 tests | Known pytest/`testpaths` interaction — always invoke files individually | §5.1 |
 | `eval_llm_client.py`'s `KeyPool`-related tests fail | No `GOOGLE_API_KEY`/`GOOGLE_API_KEYS` set at all | §5.1 |
 | `eval_llm_client.py::test_keyed_gemini_binds_the_given_key` fails specifically | Possible `google-adk` package resolution drift — see §5.2's note before assuming a real regression | §5.2 |
+| `janus.yaml` validation checks failing | Commands in janus.yaml are incorrect or tools not installed | §4.6 |
+| Multi-provider model errors | ADK/LiteLLM compatibility issue, or invalid BYOK API key | §8 |

