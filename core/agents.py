@@ -89,7 +89,7 @@ the Reviewer agent.
 
 Rules:
 - Always propose a complete replacement of the file(s) you are editing, as
-  a fenced python code block, never a diff.
+  a fenced {language} code block, never a diff.
 - When the Reviewer gives you a critique with a concrete failing test, you
   MUST either (a) fix the code so that test passes, or (b) explain
   specifically why the test's premise is wrong (e.g. it tests behavior
@@ -126,7 +126,7 @@ Repository context:
 Concretely:
 
 - IGNORE: naming preferences, formatting, comment style, minor
-  redundancy, anything ruff/mypy would already catch (those run
+  redundancy, anything the static analysis tools configured in the gate would already catch (those run
   separately — don't repeat them).
 - LOOK FOR: edge cases (empty/None/zero/negative inputs), mutation of
   caller-owned state, off-by-one errors, resource leaks, unhandled
@@ -145,10 +145,19 @@ Concretely:
 - If you find nothing that clears this bar, say so plainly: "No further
   issues found." Do not manufacture a critique to seem thorough.
 - You cannot edit the Patcher's source file. You can only sandbox copies,
-  write test files, and run checks."""
+  write test files, and run checks.
+- End your review with exactly one verdict line:
+  VERDICT: PASS — if the code is correct and you found nothing real
+  VERDICT: ISSUE_FOUND — if you found and proved a concrete defect
+  VERDICT: INCONCLUSIVE — if you suspect a problem but cannot prove it
+    with an executable test (e.g., a design concern, a performance issue
+    you can't benchmark in-sandbox, or a concurrency issue that requires
+    specific timing). This flags the PR for human review.
+
+Target language: {language}"""
 
 
-def build_patcher() -> tuple[LlmAgent, int]:
+def build_patcher(language: str = "python") -> tuple[LlmAgent, int]:
     """Build the Patcher agent with full gate toolset access.
 
     Returns (agent, key_index) — key_index identifies which pool key this
@@ -156,11 +165,12 @@ def build_patcher() -> tuple[LlmAgent, int]:
     `llm_client.get_key_pool().mark_rate_limited(key_index)`.
     """
     model, key_index = build_model(settings.MODEL)
+    instruction = PATCHER_INSTRUCTION.format(language=language)
     agent = LlmAgent(
         model=model,
         name="patcher",
         description="Proposes and revises code patches for a given ticket.",
-        instruction=PATCHER_INSTRUCTION,
+        instruction=instruction,
         tools=[_gate_toolset_full],
     )
     return agent, key_index
@@ -169,6 +179,7 @@ def build_patcher() -> tuple[LlmAgent, int]:
 def build_reviewer(
     retrieved_examples: str = "(none retrieved)",
     repo_context: str = "No repository context available.",
+    language: str = "python",
 ) -> tuple[LlmAgent, int]:
     """Build the Reviewer agent, injecting two distinct retrieved contexts
     into its instruction: behavioral examples (retrieval.py) and
@@ -187,6 +198,7 @@ def build_reviewer(
     instruction = REVIEWER_INSTRUCTION_TEMPLATE.format(
         retrieved_examples=retrieved_examples,
         repo_context=repo_context,
+        language=language,
     )
     model, key_index = build_model(settings.MODEL)
     agent = LlmAgent(

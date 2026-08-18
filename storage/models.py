@@ -72,6 +72,12 @@ class DebateSession(Base):
     pr_number: Optional[int] = Column(Integer, nullable=True)  # type: ignore[assignment]
     commit_sha: Optional[str] = Column(String(64), nullable=True)  # type: ignore[assignment]
     webhook_url: Optional[str] = Column(String(2048), nullable=True)  # type: ignore[assignment]
+    # Janus 2.0 — Reviewer-first verdict tracking.
+    # reviewer_verdict stores the final verdict from the last review round:
+    # "PASS", "ISSUE_FOUND", or "INCONCLUSIVE".
+    # needs_human_review is True when any round returned INCONCLUSIVE.
+    reviewer_verdict: Optional[str] = Column(String(32), nullable=True)  # type: ignore[assignment]
+    needs_human_review: Optional[bool] = Column(Boolean, nullable=True, default=False)  # type: ignore[assignment]
     created_at: datetime = Column(  # type: ignore[assignment]
         DateTime(timezone=True),
         nullable=False,
@@ -136,6 +142,8 @@ class DebateSession(Base):
             "pr_number": self.pr_number,
             "commit_sha": self.commit_sha,
             "webhook_url": self.webhook_url,
+            "reviewer_verdict": self.reviewer_verdict,
+            "needs_human_review": self.needs_human_review,
             "rounds": [r.to_dict() for r in self.rounds],
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
@@ -164,6 +172,8 @@ class Round(Base):
     reviewer_skipped_counterexample: bool = Column(  # type: ignore[assignment]
         Boolean, nullable=False, default=False
     )
+    # Janus 2.0 — the Reviewer's verdict for this round
+    reviewer_verdict: Optional[str] = Column(String(32), nullable=True)  # type: ignore[assignment]
     created_at: datetime = Column(  # type: ignore[assignment]
         DateTime(timezone=True),
         nullable=False,
@@ -217,5 +227,6 @@ class Round(Base):
             "stop_reason": self.stop_reason,
             "code_extraction_failed": self.code_extraction_failed,
             "reviewer_skipped_counterexample": self.reviewer_skipped_counterexample,
+            "reviewer_verdict": self.reviewer_verdict,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

@@ -376,13 +376,40 @@ def run_security_scan(repo_dir: str, target_file: str | None = None) -> dict:
 
 
 def run_full_gate(repo_dir: str, target_file: str | None = None) -> dict:
-    """Run all four checks. The patch only merges if every check passes.
+    """Run all validation checks. The patch only merges if every check passes.
+
+    If the repository contains a janus.yaml with custom checks defined,
+    those checks are used instead of the hardcoded defaults. This enables
+    language-agnostic validation — the gate doesn't need to know what
+    tools a repo uses, only that exit code 0 means pass.
+
+    When no janus.yaml exists (or it defines no checks), falls back to the
+    original four Python checks: ruff, mypy, pytest, bandit.
 
     target_file, when given, scopes the three static checks (lint, type,
     security) to just that file — see run_linter's docstring for why
     that's sound given this system's architecture. run_tests always runs
     the full suite regardless, by design — see run_tests's docstring.
     """
+    # Check for per-repo configuration (janus.yaml)
+    from core.repo_config import load_repo_config
+    from core.validation import run_checks
+
+    config = load_repo_config(repo_dir)
+    if config.checks:
+        # janus.yaml defines custom checks — use those instead of defaults
+        result = run_checks(repo_dir, config, target_file)
+        logger.info(
+            "gate_result",
+            repo_dir=repo_dir,
+            target_file=target_file,
+            passed=result["passed"],
+            checks={c["check"]: c["passed"] for c in result["checks"]},
+            source="janus.yaml",
+        )
+        return result
+
+    # Default: hardcoded Python checks (backward compatible)
     checks = [
         run_linter(repo_dir, target_file),
         run_type_check(repo_dir, target_file),

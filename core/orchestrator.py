@@ -41,6 +41,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -51,6 +52,7 @@ from core.agents import build_patcher, build_reviewer
 from core.config import settings
 from core import diagnostics
 from core.gate import run_full_gate, sandbox_copy
+from core.language import detect_language
 from core.llm_client import get_key_pool, is_rate_limit_error
 from core.observability import CostTracker, LLMCallStats, get_logger, metrics
 from core.path_safety import validate_repo_ref
@@ -59,7 +61,34 @@ from storage.models import DebateSession, Round
 
 logger = get_logger(__name__)
 
-CODE_BLOCK_RE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
+CODE_BLOCK_RE = re.compile(r"```(?:\w+)?\s*\n(.*?)```", re.DOTALL)
+
+# Matches the structured verdict line emitted by the Reviewer per the
+# prompt contract in agents.py's REVIEWER_INSTRUCTION_TEMPLATE.
+VERDICT_RE = re.compile(
+    r"VERDICT:\s*(PASS|ISSUE_FOUND|INCONCLUSIVE)", re.IGNORECASE
+)
+
+
+def _parse_verdict(reviewer_text: str) -> ReviewerVerdict:
+    """Extract the Reviewer's structured verdict from its output.
+
+    Falls back to legacy heuristic ("no further issues found" → PASS)
+    for backward compatibility with Reviewer outputs that predate the
+    verdict-line prompt addition.  If neither matches, defaults to
+    ISSUE_FOUND (conservative: assume something was flagged).
+    """
+    match = VERDICT_RE.search(reviewer_text)
+    if match:
+        raw = match.group(1).upper()
+        try:
+            return ReviewerVerdict(raw)
+        except ValueError:
+            pass
+    # Legacy fallback
+    if "no further issues found" in reviewer_text.lower():
+        return ReviewerVerdict.PASS
+    return ReviewerVerdict.ISSUE_FOUND
 
 
 # ---------------------------------------------------------------------------
@@ -139,12 +168,24 @@ _circuit_breaker = CircuitBreaker()
 # ---------------------------------------------------------------------------
 
 
+class ReviewerVerdict(str, Enum):
+    """Structured verdict from the Reviewer agent.
+
+    str enum so it JSON-serializes directly into DB fields and API
+    responses without a custom encoder.
+    """
+    PASS = "PASS"               # Code is fine, no patcher needed
+    ISSUE_FOUND = "ISSUE_FOUND" # Concrete bug, patcher must fix
+    INCONCLUSIVE = "INCONCLUSIVE"  # Flag for human review
+
+
 @dataclass
 class RoundLog:
     round_num: int
     patch_text: str
     reviewer_text: str
     gate_result: dict[str, Any]
+    reviewer_verdict: str = "ISSUE_FOUND"  # ReviewerVerdict value
     retrieved_example_ids: list[str] = field(default_factory=list)
     repo_context_signals: dict[str, Any] = field(default_factory=dict)
     stop_reason: str | None = None
@@ -159,6 +200,8 @@ class DebateResult:
     final_gate: dict[str, Any] | None = None
     sandbox_path: str | None = None
     cost: dict[str, Any] | None = None
+    needs_human_review: bool = False  # True when any round was INCONCLUSIVE
+    reviewer_verdict: str = "ISSUE_FOUND"  # Final verdict from last round
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +322,7 @@ async def _ask(
 
 
 def _extract_code(text: str, fallback: str) -> tuple[str, bool]:
-    """Extract a Python code block from the agent's response.
+    """Extract a fenced code block from the agent's response.
 
     Returns (code, extraction_failed). If no code block is found,
     returns the fallback and True so the caller can log the failure.
@@ -309,8 +352,11 @@ def _check_reviewer_wrote_test(
     Returns True if the Reviewer gave a non-empty critique but wrote no
     new test file — i.e. it skipped the counterexample requirement.
     """
-    if "no further issues found" in reviewer_text.lower():
-        return False  # Reviewer is satisfied, no test expected
+    # Use the structured verdict to determine if a test is expected.
+    # PASS and INCONCLUSIVE don't require a counterexample test.
+    verdict = _parse_verdict(reviewer_text)
+    if verdict in (ReviewerVerdict.PASS, ReviewerVerdict.INCONCLUSIVE):
+        return False  # Reviewer is satisfied or inconclusive, no test expected
 
     # Check for new test files
     tests_dir = sandbox / "tests"
@@ -459,6 +505,7 @@ def _persist_round(
             stop_reason=round_log.stop_reason,
             code_extraction_failed=round_log.code_extraction_failed,
             reviewer_skipped_counterexample=round_log.reviewer_skipped_counterexample,
+            reviewer_verdict=round_log.reviewer_verdict,
         )
         db.add(db_round)
     logger.info(
@@ -476,6 +523,8 @@ def _persist_session_end(
     cost: dict[str, Any] | None,
     sandbox_path: str | None,
     error_message: str | None = None,
+    reviewer_verdict: str | None = None,
+    needs_human_review: bool = False,
 ) -> None:
     """Update the DebateSession with final results."""
     status = "merged" if merged else "rejected"
@@ -490,12 +539,16 @@ def _persist_session_end(
             session.cost_json = json.dumps(cost) if cost else None  # type: ignore[assignment]
             session.sandbox_path = sandbox_path  # type: ignore[assignment]
             session.error_message = error_message  # type: ignore[assignment]
+            session.reviewer_verdict = reviewer_verdict  # type: ignore[assignment]
+            session.needs_human_review = needs_human_review  # type: ignore[assignment]
             session.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
     logger.info(
         "debate_session_completed",
         debate_id=debate_id,
         status=status,
         merged=merged,
+        reviewer_verdict=reviewer_verdict,
+        needs_human_review=needs_human_review,
     )
 
 
@@ -511,14 +564,16 @@ async def run_debate(
     debate_id: str | None = None,
     tenant_id: str | None = None,
 ) -> DebateResult:
-    """Run a complete adversarial code review debate.
+    """Run a complete adversarial code review debate (Reviewer-first).
 
-    This is the core loop:
-    1. Patcher proposes a fix
-    2. Reviewer critiques with executable counterexamples
-    3. Patcher responds to valid critiques
-    4. Repeat until Reviewer is satisfied or round cap hit
-    5. Deterministic gate makes the final merge/reject decision
+    The Reviewer examines the existing code first and returns a verdict:
+    - PASS: code is fine → run final gate → merge if it passes
+    - INCONCLUSIVE: can't determine → flag for human review, no merge
+    - ISSUE_FOUND: concrete bug found → Patcher fixes → iterate
+
+    Only ISSUE_FOUND invokes the Patcher. Good PRs cost exactly one LLM
+    call (the initial review), preventing the Patcher from "fixing"
+    things that aren't broken.
 
     Safe to call concurrently — each debate gets its own sandbox,
     agent instances, and DB records.
@@ -572,6 +627,18 @@ async def _run_debate_inner(
     sandbox: Path,
     cost_tracker: CostTracker,
 ) -> DebateResult:
+    """Reviewer-first debate loop (Janus 2.0).
+
+    Flow:
+    1. Reviewer examines the EXISTING code (no Patcher yet).
+    2. Parse VERDICT: PASS → gate check → done.
+       INCONCLUSIVE → flag for human review → done.
+       ISSUE_FOUND → proceed to step 3.
+    3. Build Patcher, fix the specific issues Reviewer found.
+    4. Run validation, Reviewer re-reviews.
+    5. Repeat steps 3-4 until PASS, INCONCLUSIVE, or MAX_ROUNDS.
+    6. Final gate makes the merge/reject decision.
+    """
     # Lazy import to avoid circular dependency at module load time
     from core.repo_context import format_repo_context_for_prompt, retrieve_repo_context
     from core.retrieval import format_examples_for_prompt, retrieve_examples
@@ -593,78 +660,11 @@ async def _run_debate_inner(
         await _persist_with_timeout(_persist_session_end, debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), error_msg)
         return DebateResult(merged=False, sandbox_path=str(sandbox))
 
-    diagnostics.trace("before_build_patcher", debate_id=debate_id)
-    patcher_agent, patcher_key_index = build_patcher()
-    patcher_runner = InMemoryRunner(agent=patcher_agent, app_name=settings.APP_NAME)
-    diagnostics.trace("after_build_patcher", debate_id=debate_id)
+    # Detect language from target file for language-agnostic prompts
+    language = detect_language(target_file)
 
     user_id = "service_account"
-    patcher_session = str(uuid.uuid4())
-    await patcher_runner.session_service.create_session(
-        app_name=settings.APP_NAME, user_id=user_id, session_id=patcher_session
-    )
-
-    async def _rebuild_patcher() -> tuple[InMemoryRunner, str, int]:
-        """Draw a fresh key from the pool and rebuild the Patcher agent,
-        runner, and session. Safe mid-debate because every prompt sent to
-        the Patcher already carries the full ticket + current code — no
-        state is lost by starting a fresh session bound to a new key."""
-        agent, idx = build_patcher()
-        r = InMemoryRunner(agent=agent, app_name=settings.APP_NAME)
-        sid = str(uuid.uuid4())
-        await r.session_service.create_session(
-            app_name=settings.APP_NAME, user_id=user_id, session_id=sid
-        )
-        return r, sid, idx
-
     result = DebateResult(merged=False, sandbox_path=str(sandbox))
-
-    # Initial patch
-    patch_prompt = (
-        f"Ticket:\n{ticket}\n\n"
-        f"Current contents of {target_file}:\n```python\n{current_code}\n```\n\n"
-        f"Propose your patch as a full replacement file."
-    )
-
-    diagnostics.trace("before_initial_ask", debate_id=debate_id)
-    try:
-        patch_text, patcher_runner, patcher_session, patcher_key_index = await _ask(
-            patcher_runner,
-            patcher_session,
-            user_id,
-            patch_prompt,
-            cost_tracker=cost_tracker,
-            key_index=patcher_key_index,
-            rebuild_on_rate_limit=_rebuild_patcher,
-        )
-        diagnostics.trace("after_initial_ask_success", debate_id=debate_id)
-    except RuntimeError as e:
-        diagnostics.trace("initial_ask_raised_runtimeerror", debate_id=debate_id, error=str(e)[:200])
-        logger.error("debate_failed_initial_patch", debate_id=debate_id, error=str(e))
-        # Previously a bare synchronous call wrapped in try/except as a
-        # stopgap after this exact live finding (see ROADMAP.md §2) — now
-        # goes through _persist_with_timeout, which offloads the blocking
-        # DB call to a thread and bounds it with a hard timeout, so a hang
-        # here becomes a loud, logged persist_call_timed_out instead of a
-        # silent stall with an ambiguous final debate state.
-        diagnostics.trace("before_persist_with_timeout", debate_id=debate_id)
-        persisted = await _persist_with_timeout(
-            _persist_session_end, debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), str(e)
-        )
-        diagnostics.trace("after_persist_with_timeout", debate_id=debate_id, persisted=persisted)
-        if not persisted:
-            logger.error(
-                "debate_final_state_not_persisted",
-                debate_id=debate_id,
-                detail="Initial patch failed and the failure state could not be "
-                       "persisted — see persist_call_timed_out/persist_call_failed "
-                       "above. sweep_zombie_sessions will eventually recover this "
-                       "session if it's left stuck in 'running'.",
-            )
-        return result
-
-    current_code, extraction_failed = _extract_code(patch_text, current_code)
-    target_path.write_text(current_code)
 
     # Snapshot pre-existing test files for counterexample detection
     tests_dir = sandbox / "tests"
@@ -672,13 +672,20 @@ async def _run_debate_inner(
     if tests_dir.exists():
         pre_existing_tests = {f.name for f in tests_dir.iterdir() if f.is_file()}
 
-    for round_num in range(1, settings.MAX_ROUNDS + 1):
-        metrics.rounds_total.inc()
-        logger.info("round_started", debate_id=debate_id, round_num=round_num)
+    # -- Helper: build and call the Reviewer for a given round -----------
 
+    async def _run_reviewer(
+        round_num: int,
+        code: str,
+        is_initial: bool,
+    ) -> tuple[str, ReviewerVerdict, list, dict]:
+        """Build a fresh Reviewer, call it, parse its verdict.
+
+        Returns (reviewer_text, verdict, examples, repo_context_dict).
+        """
         # Retrieve examples for this round's code
         try:
-            examples = retrieve_examples(current_code, top_k=3)
+            examples = retrieve_examples(code, top_k=3)
         except Exception as e:
             logger.warning(
                 "retrieval_failed",
@@ -688,11 +695,10 @@ async def _run_debate_inner(
             )
             examples = []
 
-        # Repo-context retrieval (GAP 14): a separate, structural source —
-        # re-read from the live sandbox every round so it always reflects
-        # the current patch, not a stale snapshot from round 1.
+        # Repo-context retrieval — re-read from the live sandbox every
+        # round so it always reflects the current patch.
         try:
-            repo_context = retrieve_repo_context(str(sandbox), target_file, current_code)
+            repo_ctx = retrieve_repo_context(str(sandbox), target_file, code)
         except Exception as e:
             logger.warning(
                 "repo_context_retrieval_failed",
@@ -700,11 +706,12 @@ async def _run_debate_inner(
                 round_num=round_num,
                 error=str(e),
             )
-            repo_context = {}
+            repo_ctx = {}
 
         reviewer_agent, reviewer_key_index = build_reviewer(
             format_examples_for_prompt(examples),
-            format_repo_context_for_prompt(repo_context),
+            format_repo_context_for_prompt(repo_ctx),
+            language=language,
         )
         reviewer_runner = InMemoryRunner(agent=reviewer_agent, app_name=settings.APP_NAME)
         reviewer_session = str(uuid.uuid4())
@@ -720,7 +727,8 @@ async def _run_debate_inner(
             accumulated yet at the point a rotation would happen."""
             agent, idx = build_reviewer(
                 format_examples_for_prompt(examples),
-                format_repo_context_for_prompt(repo_context),
+                format_repo_context_for_prompt(repo_ctx),
+                language=language,
             )
             r = InMemoryRunner(agent=agent, app_name=settings.APP_NAME)
             sid = str(uuid.uuid4())
@@ -729,93 +737,216 @@ async def _run_debate_inner(
             )
             return r, sid, idx
 
+        context_label = (
+            f"Current contents of {target_file}"
+            if is_initial
+            else f"Patcher's current version of {target_file}"
+        )
+
         review_prompt = (
             f"Ticket:\n{ticket}\n\n"
-            f"Patcher's current version of {target_file} "
-            f"(sandbox at {sandbox}):\n```python\n{current_code}\n```\n\n"
+            f"{context_label} "
+            f"(sandbox at {sandbox}):\n```{language}\n{code}\n```\n\n"
             f"The repo root for your tools is: {sandbox}\n"
-            f"Review this patch. If you find a real issue, write an "
+            f"Review this code. If you find a real issue, write an "
             f"executable counterexample test and run it to confirm it "
             f"fails, then report the failure. If nothing clears the bar, "
-            f"say 'No further issues found.'"
+            f"say 'No further issues found.' End with your VERDICT line."
         )
 
-        try:
-            reviewer_text, reviewer_runner, reviewer_session, reviewer_key_index = await _ask(
-                reviewer_runner,
-                reviewer_session,
-                user_id,
-                review_prompt,
-                cost_tracker=cost_tracker,
-                key_index=reviewer_key_index,
-                rebuild_on_rate_limit=_rebuild_reviewer,
-            )
-        except RuntimeError as e:
+        text, _, _, _ = await _ask(
+            reviewer_runner,
+            reviewer_session,
+            user_id,
+            review_prompt,
+            cost_tracker=cost_tracker,
+            key_index=reviewer_key_index,
+            rebuild_on_rate_limit=_rebuild_reviewer,
+        )
+
+        verdict = _parse_verdict(text)
+        return text, verdict, examples, repo_ctx
+
+    # ===================================================================
+    # PHASE 1: Initial Review (Reviewer goes first on existing code)
+    # ===================================================================
+
+    diagnostics.trace("before_initial_review", debate_id=debate_id)
+    metrics.rounds_total.inc()
+    logger.info("round_started", debate_id=debate_id, round_num=0, phase="initial_review")
+
+    try:
+        reviewer_text, verdict, examples, repo_context = await _run_reviewer(
+            round_num=0, code=current_code, is_initial=True
+        )
+        diagnostics.trace("after_initial_review", debate_id=debate_id, verdict=verdict.value)
+    except RuntimeError as e:
+        logger.error("debate_failed_initial_review", debate_id=debate_id, error=str(e))
+        diagnostics.trace("initial_review_raised_runtimeerror", debate_id=debate_id, error=str(e)[:200])
+        persisted = await _persist_with_timeout(
+            _persist_session_end, debate_id, False, {}, cost_tracker.to_dict(), str(sandbox), str(e)
+        )
+        if not persisted:
             logger.error(
-                "debate_failed_reviewer",
+                "debate_final_state_not_persisted",
                 debate_id=debate_id,
-                round_num=round_num,
-                error=str(e),
+                detail="Initial review failed and the failure state could not be "
+                       "persisted — see persist_call_timed_out/persist_call_failed "
+                       "above. sweep_zombie_sessions will eventually recover this "
+                       "session if it's left stuck in 'running'.",
             )
-            break
+        return result
 
-        gate_result = run_full_gate(str(sandbox), target_file)
+    # Detect if Reviewer gave a critique without a counterexample test
+    skipped_counterexample = _check_reviewer_wrote_test(
+        sandbox, pre_existing_tests, reviewer_text
+    )
 
-        # Track gate check pass/fail by type
-        for check in gate_result.get("checks", []):
-            outcome = f"{check['check']}_{'pass' if check['passed'] else 'fail'}"
-            metrics.gate_checks.inc(outcome)
+    # Record the initial review as round 0 (Reviewer-only, no patch)
+    initial_round = RoundLog(
+        round_num=0,
+        patch_text="",  # No Patcher ran yet
+        reviewer_text=reviewer_text,
+        gate_result={},  # No gate ran yet
+        reviewer_verdict=verdict.value,
+        retrieved_example_ids=[ex.get("id", "") for ex in examples],
+        repo_context_signals={
+            "callers": repo_context.get("call_graph", {}).get("callers", []),
+            "prior_fix_shas": [f.get("sha", "") for f in repo_context.get("prior_fixes", [])],
+            "test_convention_files": len(repo_context.get("test_conventions", [])),
+        },
+        stop_reason=None,
+        code_extraction_failed=False,
+        reviewer_skipped_counterexample=skipped_counterexample,
+    )
+    result.rounds.append(initial_round)
+    result.reviewer_verdict = verdict.value
+    await _persist_with_timeout(_persist_round, debate_id, initial_round)
 
-        # Detect if Reviewer gave a critique without a counterexample test
-        skipped_counterexample = _check_reviewer_wrote_test(
-            sandbox, pre_existing_tests, reviewer_text
+    logger.info(
+        "initial_review_complete",
+        debate_id=debate_id,
+        verdict=verdict.value,
+        skipped_counterexample=skipped_counterexample,
+    )
+
+    # ---------------------------------------------------------------
+    # PASS: Code is fine → run final gate → done
+    # ---------------------------------------------------------------
+    if verdict == ReviewerVerdict.PASS:
+        logger.info("reviewer_passed", debate_id=debate_id)
+        final_gate = run_full_gate(str(sandbox), target_file)
+        result.final_gate = final_gate
+        result.merged = final_gate["passed"]
+        result.cost = cost_tracker.to_dict()
+        result.reviewer_verdict = ReviewerVerdict.PASS.value
+
+        metrics.debates_completed.inc()
+        metrics.rounds_per_debate.observe(len(result.rounds))
+        if result.merged:
+            metrics.debates_merged.inc()
+        else:
+            metrics.debates_rejected.inc()
+
+        await _persist_with_timeout(
+            _persist_session_end,
+            debate_id,
+            result.merged,
+            final_gate,
+            cost_tracker.to_dict(),
+            str(sandbox),
+            reviewer_verdict=ReviewerVerdict.PASS.value,
         )
-
-        stop_reason = None
-        if "no further issues found" in reviewer_text.lower():
-            stop_reason = "reviewer_satisfied"
-        elif round_num == settings.MAX_ROUNDS:
-            stop_reason = "max_rounds_reached"
-
-        round_log = RoundLog(
-            round_num=round_num,
-            patch_text=patch_text,
-            reviewer_text=reviewer_text,
-            gate_result=gate_result,
-            retrieved_example_ids=[ex.get("id", "") for ex in examples],
-            repo_context_signals={
-                "callers": repo_context.get("call_graph", {}).get("callers", []),
-                "prior_fix_shas": [f.get("sha", "") for f in repo_context.get("prior_fixes", [])],
-                "test_convention_files": len(repo_context.get("test_conventions", [])),
-            },
-            stop_reason=stop_reason,
-            code_extraction_failed=extraction_failed,
-            reviewer_skipped_counterexample=skipped_counterexample,
+        logger.info(
+            "debate_completed",
+            debate_id=debate_id,
+            merged=result.merged,
+            rounds=len(result.rounds),
+            verdict="PASS",
         )
-        result.rounds.append(round_log)
+        return result
 
-        # Persist round immediately (survives crashes)
-        await _persist_with_timeout(_persist_round, debate_id, round_log)
+    # ---------------------------------------------------------------
+    # INCONCLUSIVE: Flag for human review → done (no Patcher)
+    # ---------------------------------------------------------------
+    if verdict == ReviewerVerdict.INCONCLUSIVE:
+        logger.info("reviewer_inconclusive", debate_id=debate_id)
+        result.needs_human_review = True
+        result.reviewer_verdict = ReviewerVerdict.INCONCLUSIVE.value
+        result.cost = cost_tracker.to_dict()
 
-        if stop_reason:
-            logger.info(
-                "debate_loop_stop",
-                debate_id=debate_id,
-                round_num=round_num,
-                reason=stop_reason,
-            )
-            break
+        metrics.debates_completed.inc()
+        metrics.rounds_per_debate.observe(len(result.rounds))
+        metrics.debates_rejected.inc()
 
-        # Update pre_existing_tests for next round
-        if tests_dir.exists():
-            pre_existing_tests = {f.name for f in tests_dir.iterdir() if f.is_file()}
+        await _persist_with_timeout(
+            _persist_session_end,
+            debate_id,
+            False,  # Never auto-merge on INCONCLUSIVE
+            {},     # No final gate run
+            cost_tracker.to_dict(),
+            str(sandbox),
+            reviewer_verdict=ReviewerVerdict.INCONCLUSIVE.value,
+            needs_human_review=True,
+        )
+        logger.info(
+            "debate_completed",
+            debate_id=debate_id,
+            merged=False,
+            rounds=len(result.rounds),
+            verdict="INCONCLUSIVE",
+            needs_human_review=True,
+        )
+        return result
+
+    # ===================================================================
+    # PHASE 2: ISSUE_FOUND — Patcher fixes, iterate
+    # ===================================================================
+
+    logger.info("reviewer_issue_found", debate_id=debate_id)
+
+    # Build Patcher only now — not before the Reviewer has found an issue
+    diagnostics.trace("before_build_patcher", debate_id=debate_id)
+    patcher_agent, patcher_key_index = build_patcher(language=language)
+    patcher_runner = InMemoryRunner(agent=patcher_agent, app_name=settings.APP_NAME)
+    diagnostics.trace("after_build_patcher", debate_id=debate_id)
+
+    patcher_session = str(uuid.uuid4())
+    await patcher_runner.session_service.create_session(
+        app_name=settings.APP_NAME, user_id=user_id, session_id=patcher_session
+    )
+
+    async def _rebuild_patcher() -> tuple[InMemoryRunner, str, int]:
+        """Draw a fresh key from the pool and rebuild the Patcher agent,
+        runner, and session. Safe mid-debate because every prompt sent to
+        the Patcher already carries the full ticket + current code — no
+        state is lost by starting a fresh session bound to a new key."""
+        agent, idx = build_patcher(language=language)
+        r = InMemoryRunner(agent=agent, app_name=settings.APP_NAME)
+        sid = str(uuid.uuid4())
+        await r.session_service.create_session(
+            app_name=settings.APP_NAME, user_id=user_id, session_id=sid
+        )
+        return r, sid, idx
+
+    last_reviewer_text = reviewer_text
+    extraction_failed = False
+
+    for round_num in range(1, settings.MAX_ROUNDS + 1):
+        metrics.rounds_total.inc()
+        logger.info("round_started", debate_id=debate_id, round_num=round_num, phase="patcher_fix")
+
+        # -- Patcher fixes the specific issues the Reviewer found -------
 
         fix_prompt = (
-            f"Reviewer's critique:\n{reviewer_text}\n\n"
-            f"Current contents of {target_file}:\n```python\n{current_code}\n```\n\n"
-            f"Fix the issue if it's real, or explain briefly why you're "
-            f"pushing back (only once per critique). Propose your patch as "
-            f"a full replacement file."
+            f"The Reviewer has identified the following issues with concrete "
+            f"failing tests. Fix ONLY these specific issues. Do not make "
+            f"unrelated changes.\n\n"
+            f"Reviewer critique:\n{last_reviewer_text}\n\n"
+            f"Current contents of {target_file}:\n```{language}\n{current_code}\n```\n\n"
+            f"Ticket:\n{ticket}\n\n"
+            f"Propose your patch as a full replacement file in a fenced "
+            f"{language} code block."
         )
 
         try:
@@ -840,10 +971,101 @@ async def _run_debate_inner(
         current_code, extraction_failed = _extract_code(patch_text, current_code)
         target_path.write_text(current_code)
 
-    # Final gate
+        # -- Run validation on the patched code -------------------------
+
+        gate_result = run_full_gate(str(sandbox), target_file)
+
+        # Track gate check pass/fail by type
+        for check in gate_result.get("checks", []):
+            outcome = f"{check['check']}_{'pass' if check['passed'] else 'fail'}"
+            metrics.gate_checks.inc(outcome)
+
+        # -- Reviewer re-reviews the patched code -----------------------
+
+        # Update pre_existing_tests for counterexample detection
+        if tests_dir.exists():
+            pre_existing_tests = {f.name for f in tests_dir.iterdir() if f.is_file()}
+
+        try:
+            reviewer_text, verdict, examples, repo_context = await _run_reviewer(
+                round_num=round_num, code=current_code, is_initial=False
+            )
+        except RuntimeError as e:
+            logger.error(
+                "debate_failed_reviewer",
+                debate_id=debate_id,
+                round_num=round_num,
+                error=str(e),
+            )
+            # Record partial round (Patcher ran but Reviewer failed)
+            round_log = RoundLog(
+                round_num=round_num,
+                patch_text=patch_text,
+                reviewer_text="",
+                gate_result=gate_result,
+                reviewer_verdict=ReviewerVerdict.ISSUE_FOUND.value,
+                stop_reason="reviewer_error",
+                code_extraction_failed=extraction_failed,
+            )
+            result.rounds.append(round_log)
+            await _persist_with_timeout(_persist_round, debate_id, round_log)
+            break
+
+        skipped_counterexample = _check_reviewer_wrote_test(
+            sandbox, pre_existing_tests, reviewer_text
+        )
+
+        # Determine stop reason
+        stop_reason = None
+        if verdict == ReviewerVerdict.PASS:
+            stop_reason = "reviewer_satisfied"
+        elif verdict == ReviewerVerdict.INCONCLUSIVE:
+            stop_reason = "reviewer_inconclusive"
+            result.needs_human_review = True
+        elif round_num == settings.MAX_ROUNDS:
+            stop_reason = "max_rounds_reached"
+
+        round_log = RoundLog(
+            round_num=round_num,
+            patch_text=patch_text,
+            reviewer_text=reviewer_text,
+            gate_result=gate_result,
+            reviewer_verdict=verdict.value,
+            retrieved_example_ids=[ex.get("id", "") for ex in examples],
+            repo_context_signals={
+                "callers": repo_context.get("call_graph", {}).get("callers", []),
+                "prior_fix_shas": [f.get("sha", "") for f in repo_context.get("prior_fixes", [])],
+                "test_convention_files": len(repo_context.get("test_conventions", [])),
+            },
+            stop_reason=stop_reason,
+            code_extraction_failed=extraction_failed,
+            reviewer_skipped_counterexample=skipped_counterexample,
+        )
+        result.rounds.append(round_log)
+        result.reviewer_verdict = verdict.value
+
+        # Persist round immediately (survives crashes)
+        await _persist_with_timeout(_persist_round, debate_id, round_log)
+
+        if stop_reason:
+            logger.info(
+                "debate_loop_stop",
+                debate_id=debate_id,
+                round_num=round_num,
+                reason=stop_reason,
+                verdict=verdict.value,
+            )
+            break
+
+        last_reviewer_text = reviewer_text
+
+    # ===================================================================
+    # PHASE 3: Final gate — sole merge authority
+    # ===================================================================
+
     final_gate = run_full_gate(str(sandbox), target_file)
     result.final_gate = final_gate
-    result.merged = final_gate["passed"]
+    result.merged = final_gate["passed"] and not result.needs_human_review
     result.cost = cost_tracker.to_dict()
 
     # Update metrics
@@ -862,6 +1084,8 @@ async def _run_debate_inner(
         final_gate,
         cost_tracker.to_dict(),
         str(sandbox),
+        reviewer_verdict=result.reviewer_verdict,
+        needs_human_review=result.needs_human_review,
     )
     if not persisted:
         logger.error(
@@ -879,6 +1103,8 @@ async def _run_debate_inner(
         debate_id=debate_id,
         merged=result.merged,
         rounds=len(result.rounds),
+        verdict=result.reviewer_verdict,
+        needs_human_review=result.needs_human_review,
         cost=cost_tracker.to_dict(),
     )
 
@@ -888,10 +1114,19 @@ async def _run_debate_inner(
 def print_debate_summary(result: DebateResult) -> None:
     """Print a human-readable summary of a debate result (for CLI use)."""
     print(f"Sandbox: {result.sandbox_path}")
+    print(f"Verdict: {result.reviewer_verdict}")
+    if result.needs_human_review:
+        print("⚠ Flagged for human review (INCONCLUSIVE)")
     for r in result.rounds:
-        print(f"\n--- Round {r.round_num} ---")
+        if r.round_num == 0:
+            print(f"\n--- Initial Review (Round 0) ---")
+            print(f"Verdict: {r.reviewer_verdict}")
+        else:
+            print(f"\n--- Round {r.round_num} ---")
+            print(f"Verdict: {r.reviewer_verdict}")
         print("Reviewer:", r.reviewer_text[:400])
-        print("Gate at this round:", "PASS" if r.gate_result["passed"] else "FAIL")
+        if r.gate_result and r.gate_result.get("passed") is not None:
+            print("Gate at this round:", "PASS" if r.gate_result["passed"] else "FAIL")
         if r.code_extraction_failed:
             print("  ⚠ Code extraction failed this round")
         if r.reviewer_skipped_counterexample:
