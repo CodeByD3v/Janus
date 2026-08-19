@@ -25,7 +25,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
-from core.config import settings
+from core.config import ModelConfig, settings
 from core.observability import get_logger
 from storage.db import claim_queued_session, get_session, run_migrations, sweep_zombie_sessions
 from storage.models import DebateSession
@@ -164,6 +164,8 @@ class Worker:
                 pr_repo = session.pr_repo
                 pr_number = session.pr_number
                 webhook_url = session.webhook_url
+                model_provider = session.model_provider
+                model_name = session.model_name
 
             logger.info(
                 "debate_running",
@@ -176,12 +178,20 @@ class Worker:
                 # Import here to avoid circular imports at module level
                 from core.orchestrator import run_debate
 
+                model_config = None
+                if model_provider and model_name:
+                    model_config = ModelConfig(
+                        provider=model_provider,
+                        model=model_name,
+                    )
+
                 result = await run_debate(
                     repo_dir=repo_ref,
                     target_file=target_file,
                     ticket=ticket,
                     debate_id=session_id,
                     tenant_id=tenant_id,
+                    model_config=model_config,
                 )
 
                 logger.info(

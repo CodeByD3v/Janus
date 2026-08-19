@@ -19,6 +19,46 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+# ---------------------------------------------------------------------------
+# Model configuration for BYOK (Bring-Your-Own-Key) — Phase 5
+# ---------------------------------------------------------------------------
+
+# Valid provider names for ModelConfig. "google" uses the internal KeyPool;
+# all others route through ADK's LiteLlm wrapper backed by the litellm library.
+SUPPORTED_PROVIDERS = frozenset({
+    "google", "openai", "anthropic", "groq", "nvidia", "cohere",
+})
+
+
+@dataclass
+class ModelConfig:
+    """Per-debate LLM provider + model selection.
+
+    This is a pure data container — it does not import or construct any
+    model objects. The debate engine treats it as opaque configuration
+    (Hard Rule 12: user's model choice is invisible to the debate loop).
+
+    provider: "google" (default, uses KeyPool), or any litellm-supported
+              provider name (openai, anthropic, groq, etc.)
+    model:    Model name within the provider (e.g. "gemini-2.5-flash",
+              "claude-sonnet-4-20250514", "gpt-4o")
+    api_key:  BYOK API key for non-Google providers. Never logged or
+              persisted in plaintext (Hard Rule 5).
+    """
+
+    provider: str = "google"
+    model: str = ""  # Empty → falls back to settings.MODEL
+    api_key: str = ""  # BYOK key; empty → use server-side key
+
+    def effective_model(self, default: str) -> str:
+        """Return the model name to use, falling back to the given default."""
+        return self.model or default
+
+    @property
+    def is_google(self) -> bool:
+        return self.provider == "google"
+
+
 def _require(name: str) -> str:
     """Read a required env var; crash immediately if missing."""
     value = os.environ.get(name)
@@ -66,6 +106,10 @@ class Settings:
     GOOGLE_API_KEY_COOLDOWN_SECONDS: float = field(
         default_factory=lambda: float(_optional("GOOGLE_API_KEY_COOLDOWN_SECONDS", "30"))
     )
+    # BYOK: server-side fallback keys for non-Google providers.
+    # Users can also provide per-request keys via the API (Enterprise tier).
+    OPENAI_API_KEY: str = field(default_factory=lambda: _optional("OPENAI_API_KEY", ""))
+    ANTHROPIC_API_KEY: str = field(default_factory=lambda: _optional("ANTHROPIC_API_KEY", ""))
 
     # --- Debate ---
     MAX_ROUNDS: int = field(default_factory=lambda: _optional_int("ADV_REVIEW_MAX_ROUNDS", 5))
@@ -283,6 +327,23 @@ class Settings:
         if self.GOOGLE_API_KEY:
             return [self.GOOGLE_API_KEY]
         return []
+
+    def byok_api_key(self, model_config: ModelConfig) -> str:
+        """Resolve the API key for a non-Google provider.
+
+        Priority:
+        1. User-provided key in model_config.api_key (Enterprise BYOK)
+        2. Server-side env var (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+        3. Empty string (will fail at the provider's client level)
+        """
+        if model_config.api_key:
+            return model_config.api_key
+
+        _env_key_map = {
+            "openai": self.OPENAI_API_KEY,
+            "anthropic": self.ANTHROPIC_API_KEY,
+        }
+        return _env_key_map.get(model_config.provider, "")
 
     def validate_for_api(self) -> None:
         """Validate settings required for the API server. Call at startup."""

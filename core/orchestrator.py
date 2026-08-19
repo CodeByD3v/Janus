@@ -49,7 +49,7 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
 
 from core.agents import build_patcher, build_reviewer
-from core.config import settings
+from core.config import ModelConfig, settings
 from core import diagnostics
 from core.gate import run_full_gate, sandbox_copy
 from core.language import detect_language
@@ -563,6 +563,7 @@ async def run_debate(
     ticket: str,
     debate_id: str | None = None,
     tenant_id: str | None = None,
+    model_config: ModelConfig | None = None,
 ) -> DebateResult:
     """Run a complete adversarial code review debate (Reviewer-first).
 
@@ -574,6 +575,10 @@ async def run_debate(
     Only ISSUE_FOUND invokes the Patcher. Good PRs cost exactly one LLM
     call (the initial review), preventing the Patcher from "fixing"
     things that aren't broken.
+
+    model_config: Optional BYOK configuration. If None, uses the
+    server-default Google Gemini model. The debate engine treats this
+    as opaque configuration (Hard Rule 12).
 
     Safe to call concurrently — each debate gets its own sandbox,
     agent instances, and DB records.
@@ -612,7 +617,8 @@ async def run_debate(
     sandbox = sandbox_copy(repo_dir)
     try:
         return await _run_debate_inner(
-            repo_dir, target_file, ticket, debate_id, tenant_id, sandbox, cost_tracker
+            repo_dir, target_file, ticket, debate_id, tenant_id,
+            sandbox, cost_tracker, model_config,
         )
     finally:
         import shutil
@@ -626,6 +632,7 @@ async def _run_debate_inner(
     tenant_id: str | None,
     sandbox: Path,
     cost_tracker: CostTracker,
+    model_config: ModelConfig | None = None,
 ) -> DebateResult:
     """Reviewer-first debate loop (Janus 2.0).
 
@@ -712,6 +719,7 @@ async def _run_debate_inner(
             format_examples_for_prompt(examples),
             format_repo_context_for_prompt(repo_ctx),
             language=language,
+            model_config=model_config,
         )
         reviewer_runner = InMemoryRunner(agent=reviewer_agent, app_name=settings.APP_NAME)
         reviewer_session = str(uuid.uuid4())
@@ -729,6 +737,7 @@ async def _run_debate_inner(
                 format_examples_for_prompt(examples),
                 format_repo_context_for_prompt(repo_ctx),
                 language=language,
+                model_config=model_config,
             )
             r = InMemoryRunner(agent=agent, app_name=settings.APP_NAME)
             sid = str(uuid.uuid4())
@@ -907,7 +916,7 @@ async def _run_debate_inner(
 
     # Build Patcher only now — not before the Reviewer has found an issue
     diagnostics.trace("before_build_patcher", debate_id=debate_id)
-    patcher_agent, patcher_key_index = build_patcher(language=language)
+    patcher_agent, patcher_key_index = build_patcher(language=language, model_config=model_config)
     patcher_runner = InMemoryRunner(agent=patcher_agent, app_name=settings.APP_NAME)
     diagnostics.trace("after_build_patcher", debate_id=debate_id)
 
@@ -921,7 +930,7 @@ async def _run_debate_inner(
         runner, and session. Safe mid-debate because every prompt sent to
         the Patcher already carries the full ticket + current code — no
         state is lost by starting a fresh session bound to a new key."""
-        agent, idx = build_patcher(language=language)
+        agent, idx = build_patcher(language=language, model_config=model_config)
         r = InMemoryRunner(agent=agent, app_name=settings.APP_NAME)
         sid = str(uuid.uuid4())
         await r.session_service.create_session(

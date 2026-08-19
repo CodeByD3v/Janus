@@ -117,6 +117,8 @@ def create_debate(
             pr_number=body.pr_number,
             commit_sha=body.commit_sha,
             webhook_url=body.webhook_url,
+            model_provider=body.model_provider,
+            model_name=body.model_name,
         )
         db.add(session)
 
@@ -175,6 +177,8 @@ def get_debate(
             pr_number=session.pr_number,
             commit_sha=session.commit_sha,
             webhook_url=session.webhook_url,
+            reviewer_verdict=session.reviewer_verdict,
+            needs_human_review=session.needs_human_review,
             rounds=[
                 RoundResponse(
                     round_num=r.round_num,
@@ -186,6 +190,7 @@ def get_debate(
                     stop_reason=r.stop_reason,
                     code_extraction_failed=r.code_extraction_failed,
                     reviewer_skipped_counterexample=r.reviewer_skipped_counterexample,
+                    reviewer_verdict=r.reviewer_verdict,
                     created_at=(r.created_at.isoformat() if r.created_at else None),
                 )
                 for r in session.rounds

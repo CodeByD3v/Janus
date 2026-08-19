@@ -38,8 +38,8 @@ from google.adk.tools.mcp_tool import MCPToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
 from mcp import StdioServerParameters
 
-from core.config import settings
-from core.llm_client import build_model
+from core.config import ModelConfig, settings
+from core.llm_client import build_model, build_model_for_config
 
 _gate_toolset_full = MCPToolset(
     connection_params=StdioConnectionParams(
@@ -157,14 +157,26 @@ Concretely:
 Target language: {language}"""
 
 
-def build_patcher(language: str = "python") -> tuple[LlmAgent, int]:
+def build_patcher(
+    language: str = "python",
+    model_config: ModelConfig | None = None,
+) -> tuple[LlmAgent, int]:
     """Build the Patcher agent with full gate toolset access.
+
+    Args:
+        language: The target language.
+        model_config: Optional explicit model configuration.
 
     Returns (agent, key_index) — key_index identifies which pool key this
     agent is bound to, so a 429 can be reported back to the pool via
     `llm_client.get_key_pool().mark_rate_limited(key_index)`.
     """
-    model, key_index = build_model(settings.MODEL)
+    if model_config is not None and not model_config.is_google:
+        model, key_index = build_model_for_config(model_config)
+    else:
+        model, key_index = build_model(
+            model_config.effective_model(settings.MODEL) if model_config else settings.MODEL
+        )
     instruction = PATCHER_INSTRUCTION.format(language=language)
     agent = LlmAgent(
         model=model,
@@ -180,6 +192,7 @@ def build_reviewer(
     retrieved_examples: str = "(none retrieved)",
     repo_context: str = "No repository context available.",
     language: str = "python",
+    model_config: ModelConfig | None = None,
 ) -> tuple[LlmAgent, int]:
     """Build the Reviewer agent, injecting two distinct retrieved contexts
     into its instruction: behavioral examples (retrieval.py) and
@@ -189,6 +202,12 @@ def build_reviewer(
     retrieval itself, it only renders the template. Neither retrieval
     source requires fine-tuned weights; fine-tuning remains future work
     — see AGENTS.md's Fine-Tuning Interface section.
+
+    Args:
+        retrieved_examples: Behavioral examples.
+        repo_context: Repository-structure facts.
+        language: The target language.
+        model_config: Optional explicit model configuration.
 
     Returns (agent, key_index) — since this is called fresh every round
     (see orchestrator.run_debate), the Reviewer gets a freshly-drawn key
@@ -200,7 +219,12 @@ def build_reviewer(
         repo_context=repo_context,
         language=language,
     )
-    model, key_index = build_model(settings.MODEL)
+    if model_config is not None and not model_config.is_google:
+        model, key_index = build_model_for_config(model_config)
+    else:
+        model, key_index = build_model(
+            model_config.effective_model(settings.MODEL) if model_config else settings.MODEL
+        )
     agent = LlmAgent(
         model=model,
         name="reviewer",

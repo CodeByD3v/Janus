@@ -27,3 +27,8 @@ prometheus-client==0.21.1
 
 # ── Configuration ──────────────────────────────────────────
 pyyaml>=6.0
+
+# ── Multi-provider BYOK (Phase 5) ─────────────────────────
+# Optional: only required when using non-Google LLM providers.
+# ADK's LiteLlm wrapper delegates to this library.
+litellm>=1.40.0

@@ -71,6 +71,16 @@ class CreateDebateRequest(BaseModel):
         description="If set (or DEFAULT_WEBHOOK_URL is configured server-side), "
         "a JSON summary is POSTed here when the debate completes",
     )
+    model_provider: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="LLM provider: 'google', 'openai', 'anthropic', 'groq', etc.",
+    )
+    model_name: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Model name within the provider (e.g. 'gpt-4o', 'claude-sonnet-4-20250514')",
+    )
 
     @field_validator("repo_ref")
     @classmethod
@@ -121,6 +131,15 @@ class CreateDebateRequest(BaseModel):
             raise ValueError("pr_repo and pr_number must be provided together, or not at all")
         return self
 
+    @field_validator("model_provider")
+    @classmethod
+    def _validate_model_provider(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            from core.config import SUPPORTED_PROVIDERS
+            if v not in SUPPORTED_PROVIDERS:
+                raise ValueError(f"Unsupported provider '{v}'. Supported: {sorted(SUPPORTED_PROVIDERS)}")
+        return v
+
 
 # ---------------------------------------------------------------------------
 # Response models
@@ -152,6 +171,7 @@ class RoundResponse(BaseModel):
     stop_reason: Optional[str] = None
     code_extraction_failed: bool = False
     reviewer_skipped_counterexample: bool = False
+    reviewer_verdict: Optional[str] = None
     created_at: Optional[str] = None
 
 
@@ -172,6 +192,8 @@ class DebateResponse(BaseModel):
     pr_number: Optional[int] = None
     commit_sha: Optional[str] = None
     webhook_url: Optional[str] = None
+    reviewer_verdict: Optional[str] = None
+    needs_human_review: Optional[bool] = None
     rounds: list[RoundResponse] = Field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None

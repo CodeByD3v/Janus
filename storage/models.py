@@ -78,6 +78,9 @@ class DebateSession(Base):
     # needs_human_review is True when any round returned INCONCLUSIVE.
     reviewer_verdict: Optional[str] = Column(String(32), nullable=True)  # type: ignore[assignment]
     needs_human_review: Optional[bool] = Column(Boolean, nullable=True, default=False)  # type: ignore[assignment]
+    # Janus 2.0 — model configuration used for this debate (Phase 5 BYOK)
+    model_provider: Optional[str] = Column(String(32), nullable=True)  # type: ignore[assignment]
+    model_name: Optional[str] = Column(String(128), nullable=True)  # type: ignore[assignment]
     created_at: datetime = Column(  # type: ignore[assignment]
         DateTime(timezone=True),
         nullable=False,
@@ -144,6 +147,8 @@ class DebateSession(Base):
             "webhook_url": self.webhook_url,
             "reviewer_verdict": self.reviewer_verdict,
             "needs_human_review": self.needs_human_review,
+            "model_provider": self.model_provider,
+            "model_name": self.model_name,
             "rounds": [r.to_dict() for r in self.rounds],
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

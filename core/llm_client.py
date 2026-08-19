@@ -191,11 +191,71 @@ def build_model(model_name: str) -> tuple[_KeyedGemini, int]:
     """Build a Gemini model instance bound to the next available key from
     the pool. Returns (model_instance, key_index) so callers can report
     the index back to mark_rate_limited() on a 429 without ever handling
-    the raw key value."""
+    the raw key value.
+
+    This is the original Google-only path. For multi-provider support,
+    use build_model_for_config() instead.
+    """
     pool = get_key_pool()
     key, index = pool.get_key()
     model = _KeyedGemini(model=model_name, bound_api_key=key)
     return model, index
+
+
+def build_model_for_config(
+    model_config: "ModelConfig",
+    default_model: str | None = None,
+) -> tuple[object, int]:
+    """Build a model instance for any supported provider.
+
+    Returns (model_instance, key_index).
+    - For Google: uses KeyPool, key_index is meaningful.
+    - For others: uses LiteLlm, key_index is -1 (no pool).
+
+    Raises RuntimeError if a non-Google provider is requested but
+    litellm is not installed.
+    """
+    from core.config import ModelConfig
+
+    if model_config is None:
+        model_config = ModelConfig()
+
+    effective_model = model_config.effective_model(
+        default_model or settings.MODEL
+    )
+
+    if model_config.is_google:
+        return build_model(effective_model)
+
+    # Non-Google provider: use ADK's LiteLlm wrapper
+    try:
+        from google.adk.models import LiteLlm
+    except ImportError as e:
+        raise RuntimeError(
+            f"LiteLlm is required for provider '{model_config.provider}' "
+            f"but could not be imported. Install litellm: pip install litellm"
+        ) from e
+
+    api_key = settings.byok_api_key(model_config)
+    if not api_key:
+        raise RuntimeError(
+            f"No API key available for provider '{model_config.provider}'. "
+            f"Provide one via the API request (BYOK) or set the "
+            f"corresponding server-side env var (e.g. OPENAI_API_KEY)."
+        )
+
+    # LiteLlm expects model strings like "openai/gpt-4o" or "anthropic/claude-sonnet-4-20250514"
+    litellm_model = f"{model_config.provider}/{effective_model}"
+
+    logger.info(
+        "build_model_litellm",
+        provider=model_config.provider,
+        model=effective_model,
+        # Never log the API key itself (Hard Rule 5)
+    )
+
+    model = LiteLlm(model=litellm_model, api_key=api_key)
+    return model, -1  # -1 = no key pool index
 
 
 def is_rate_limit_error(exc: Exception) -> bool:
