@@ -28,11 +28,13 @@ storage, a queue-based worker, and observable infrastructure.
 - A retrieval pipeline that can be grown (batch ingestion) without redeployment
 - Production infrastructure: persistence, authenticated API, observability,
   concurrency, CI/CD
+- GitHub App webhook handler (`/janus review` comment trigger, PR
+  open/sync events, fork PR protection, HMAC-SHA256 signature
+  verification) — see `api/github_app.py`
 
 **What is future work:**
 - Fine-tuning the Reviewer on a large mined dataset of PR comments that
   historically preceded a real bug-fix commit
-- GitHub App integration (Phase 6)
 - Auto-merge (Phase 7)
 
 ---
@@ -322,6 +324,8 @@ docker compose up --build
 | `SANDBOX_IMAGE` | If containerized | `adv-review-sandbox:latest` | Sandbox Docker image |
 | `OPENAI_API_KEY` | No | — | BYOK API key |
 | `ANTHROPIC_API_KEY` | No | — | BYOK API key |
+| `GITHUB_WEBHOOK_SECRET` | No | — | HMAC-SHA256 secret for verifying GitHub webhook signatures |
+| `GITHUB_APP_ID` | No | — | GitHub App ID for installation tracking |
 
 ### janus.yaml Configuration
 Per-repo configuration via `janus.yaml` allows developers to set custom validation checks, trigger modes, BYOK models (for enterprise users), and more.

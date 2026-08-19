@@ -284,12 +284,23 @@ class Settings:
     GITHUB_API_URL: str = field(
         default_factory=lambda: _optional("GITHUB_API_URL", "https://api.github.com")
     )
+    GITHUB_WEBHOOK_SECRET: str = field(
+        default_factory=lambda: _optional("GITHUB_WEBHOOK_SECRET", "")
+    )
     # Fallback used only when a request doesn't set its own webhook_url.
     DEFAULT_WEBHOOK_URL: str = field(
         default_factory=lambda: _optional("DEFAULT_WEBHOOK_URL", "")
     )
     NOTIFICATION_TIMEOUT_SECONDS: int = field(
         default_factory=lambda: _optional_int("NOTIFICATION_TIMEOUT_SECONDS", 10)
+    )
+
+    # --- GitHub App (Phase 6) ---
+    GITHUB_WEBHOOK_SECRET: str = field(
+        default_factory=lambda: _optional("GITHUB_WEBHOOK_SECRET", "")
+    )
+    GITHUB_APP_ID: str = field(
+        default_factory=lambda: _optional("GITHUB_APP_ID", "")
     )
 
     # --- MCP Server ---

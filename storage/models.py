@@ -47,6 +47,16 @@ class Base(DeclarativeBase):
     __allow_unmapped__ = True
 
 
+class GithubInstallation(Base):
+    __tablename__ = "github_installations"
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    installation_id: int = Column(Integer, nullable=False, unique=True, index=True)
+    account_login: str = Column(String(256), nullable=False)
+    account_type: str = Column(String(32), nullable=False)  # 'User' or 'Organization'
+    tenant_id: Optional[str] = Column(String(128), nullable=True)
+    created_at: datetime = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class DebateSession(Base):
     """A single adversarial code review debate."""
 

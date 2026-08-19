@@ -61,6 +61,9 @@ if _cors_origins:
         allow_headers=["X-API-Key", "Content-Type"],
     )
 
+from api.github_app import github_router
+app.include_router(github_router)
+
 
 # ---------------------------------------------------------------------------
 # Startup / shutdown
