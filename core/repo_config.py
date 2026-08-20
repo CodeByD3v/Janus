@@ -22,9 +22,11 @@ class RepoConfig:
     # Phase 5 — per-repo model configuration (BYOK)
     model_provider: str = ""  # e.g. "openai", "anthropic"; empty = server default
     model_name: str = ""      # e.g. "gpt-4o", "claude-sonnet-4-20250514"; empty = server default
-    # Phase 7 fields — not used yet, but reserved in the schema:
-    auto_merge: bool = False
-    trigger: str = "manual"  # "manual" | "automatic"
+    # Phase 7 — auto-merge configuration
+    auto_merge: bool = False  # Must be explicitly opted in
+    trigger: str = "manual"  # "manual" (only /janus review) | "automatic" (on PR open/sync)
+    auto_merge_branches: list[str] = field(default_factory=list)  # e.g. ["dependabot/*"]
+    auto_merge_authors: list[str] = field(default_factory=list)  # Trusted authors for auto-merge
 
     @classmethod
     def from_yaml(cls, path: Path) -> RepoConfig:
@@ -52,6 +54,17 @@ class RepoConfig:
         if not isinstance(model_section, dict):
             model_section = {}
 
+        # Auto-merge configuration from janus.yaml:
+        #   auto_merge: true
+        #   auto_merge_branches: ["dependabot/*"]
+        #   auto_merge_authors: ["dependabot[bot]"]
+        auto_merge_branches = raw.get("auto_merge_branches", [])
+        if not isinstance(auto_merge_branches, list):
+            auto_merge_branches = []
+        auto_merge_authors = raw.get("auto_merge_authors", [])
+        if not isinstance(auto_merge_authors, list):
+            auto_merge_authors = []
+
         return cls(
             checks=checks,
             language=raw.get("language", ""),
@@ -59,6 +72,8 @@ class RepoConfig:
             model_name=model_section.get("name", ""),
             auto_merge=bool(raw.get("auto_merge", False)),
             trigger=raw.get("trigger", "manual"),
+            auto_merge_branches=[str(b) for b in auto_merge_branches],
+            auto_merge_authors=[str(a) for a in auto_merge_authors],
         )
 
     def to_model_config(self) -> "ModelConfig | None":

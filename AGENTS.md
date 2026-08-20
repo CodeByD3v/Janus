@@ -31,11 +31,13 @@ storage, a queue-based worker, and observable infrastructure.
 - GitHub App webhook handler (`/janus review` comment trigger, PR
   open/sync events, fork PR protection, HMAC-SHA256 signature
   verification) — see `api/github_app.py`
+- Enterprise auto-merge with configurable branch patterns and trusted
+  author lists, gated by `janus.yaml` opt-in and INCONCLUSIVE verdict
+  blocking — see `core/auto_merge.py`
 
 **What is future work:**
 - Fine-tuning the Reviewer on a large mined dataset of PR comments that
   historically preceded a real bug-fix commit
-- Auto-merge (Phase 7)
 
 ---
 

@@ -221,6 +221,36 @@ class Worker:
                     webhook_url=webhook_url,
                 )
 
+                # Phase 7: Auto-merge if all conditions are met.
+                # Best-effort — a failed merge never retroactively fails
+                # the debate. Only attempted when there's a PR to merge.
+                if pr_repo and pr_number and result.merged:
+                    try:
+                        from core.auto_merge import should_auto_merge, execute_auto_merge
+                        from core.repo_config import load_repo_config
+
+                        repo_config = load_repo_config(repo_ref)
+                        if should_auto_merge(
+                            repo_config=repo_config,
+                            merged=result.merged,
+                            needs_human_review=result.needs_human_review,
+                        ):
+                            # Load commit_sha from session for SHA pinning
+                            with get_session() as db:
+                                s = db.query(DebateSession).filter_by(id=session_id).first()
+                                sha = s.commit_sha if s else None
+                            execute_auto_merge(
+                                pr_repo=pr_repo,
+                                pr_number=pr_number,
+                                commit_sha=sha,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "auto_merge_error",
+                            debate_id=session_id,
+                            error=str(e),
+                        )
+
             except Exception as e:
                 logger.error(
                     "debate_failed",
