@@ -1,0 +1,275 @@
+%% Janus Adversarial Code Review System — end-to-end workflow
+%% This diagram covers API and GitHub entry points, queue execution,
+%% reviewer-first debates, deterministic verification, persistence,
+%% notifications, auto-merge, administration, and fail-closed boundaries.
+
+flowchart TD
+    START([Review request arrives])
+
+    subgraph ENTRY["1. Entry points and trust boundaries"]
+        API_REQ["POST /debates<br/>Tenant API request"]
+        API_AUTH["X-API-Key authentication<br/>Hash lookup + tenant role + rate limit"]
+        API_VALIDATE["Validate request schema<br/>repo allowlist, target-file safety,<br/>PR/webhook cross-field checks"]
+        ENQUEUE["Create DebateSession<br/>status = queued<br/>persist encrypted BYOK only"]
+
+        GH_EVENT["POST /github/webhook<br/>GitHub installation, issue_comment,<br/>or pull_request event"]
+        GH_SECRET["Verify HMAC-SHA256 signature<br/>required secret missing => 503<br/>invalid signature => 401"]
+        GH_INSTALL["Installation lifecycle<br/>created => register tenant installation<br/>deleted => revoke installation"]
+        GH_META["Resolve installation, tenant,<br/>repository, PR, head SHA, branch,<br/>author, and changed files"]
+        GH_TRIGGER["Trigger policy<br/>/janus review comment = manual<br/>pull_request opened/synchronize requires<br/>janus.yaml trigger: automatic"]
+        GH_SAFE["Fail closed when metadata is missing<br/>or PR is from a fork"]
+        GH_TARGET["Choose first supported safe source file<br/>and create DebateSession with exact commit SHA"]
+        GH_ACK["Best-effort GitHub side effects<br/>acknowledgment comment +<br/>No checks required commit status"]
+    end
+
+    subgraph STORAGE["2. Persistent state and observability"]
+        DB["SQL database<br/>DebateSession, Round, GithubInstallation"]
+        QUEUE["Queued session state"]
+        ROUND_DB["Per-round persistence<br/>reviewer text, patch, gate result,<br/>retrieval signals, stop reason"]
+        FINAL_DB["Final state persistence<br/>merged/rejected/error, verdict,<br/>human-review flag, cost, gate result"]
+        METRICS["Structured logs + Prometheus metrics<br/>debates, rounds, gate checks, retries,<br/>costs, cleanup, and failure states"]
+    end
+
+    subgraph WORKER["3. Queue worker and repository materialization"]
+        POLL["Worker poll cycle"]
+        CLAIM["Atomic claim_queued_session<br/>prevents duplicate processing"]
+        CONCURRENCY["Concurrency semaphore<br/>bounded active debates"]
+        LOAD["Load immutable session inputs<br/>off event loop"]
+        GH_MATERIALIZE{"PR slug or local path?"}
+        MATERIALIZE["GitHub materializer<br/>download exact commit archive with<br/>installation-scoped token; validate archive paths"]
+        LOCAL_REPO["Use local repository reference"]
+        REPO_INPUT["Effective repository snapshot"]
+        REPO_CONFIG["Load janus.yaml<br/>custom checks, trigger, auto-merge,<br/>model/provider configuration"]
+        BYOK["Decrypt BYOK key only in memory<br/>construct provider-specific model config"]
+        WORKER_ERROR["Worker error handler<br/>mark session error off event loop"]
+        ZOMBIE["Periodic zombie sweep<br/>recover stale running sessions"]
+        SHUTDOWN["SIGINT/SIGTERM<br/>stop polling and drain active tasks"]
+    end
+
+    subgraph DEBATE["4. Reviewer-first adversarial debate"]
+        ORCH_VALIDATE["Defense-in-depth repo validation<br/>validate_repo_ref before sandboxing"]
+        START_PERSIST["Persist running state<br/>thread-offloaded DB call with timeout"]
+        SANDBOXES["Create two isolated copies<br/>candidate sandbox + immutable baseline sandbox"]
+        TARGET_READ["Resolve target file inside sandbox<br/>path traversal denied; read current code"]
+        LANGUAGE["Detect target language<br/>language-agnostic prompt"]
+
+        RETRIEVE["Fresh retrieval each round"]
+        BEHAVIOR["Behavioral retrieval<br/>ChromaDB historical real-catch examples"]
+        REPO_CONTEXT["Repository-context retrieval<br/>callers/callees, prior fix commits,<br/>test conventions"]
+        REVIEWER_BUILD["Build Reviewer agent<br/>same model family; key-pool binding"]
+        REVIEWER_TOOLS["Reviewer MCP tool filter<br/>sandbox_copy, write_candidate_test,<br/>run_candidate_test, tests, lint, types, security<br/>NO run_full_gate and NO source-file writes"]
+        REVIEW_CALL["Reviewer LLM call<br/>timeout, retry/backoff, circuit breaker,<br/>rate-limit key rotation"]
+        INITIAL_VERDICT{"Reviewer verdict"}
+        PASS0["PASS<br/>No concrete defect proven"]
+        INCONCLUSIVE0["INCONCLUSIVE<br/>Concern cannot be proven"]
+        ISSUE0["ISSUE_FOUND<br/>Executable counterexample confirmed"]
+
+        PATCHER_BUILD["Build Patcher only after ISSUE_FOUND<br/>full gate MCP tool filter; key-pool binding"]
+        PATCHER_TOOLS["Patcher MCP permissions<br/>sandbox_copy, lint, type check, tests,<br/>security scan, run_full_gate"]
+        PATCH["Patcher proposes full replacement<br/>for the target file"]
+        EXTRACT["Extract fenced code<br/>missing block => retain previous code<br/>and record extraction failure"]
+        WRITE["Write candidate source<br/>only inside candidate sandbox"]
+        ROUND_GATE["Run candidate validation gate<br/>and baseline comparison"]
+        COUNTEREXAMPLE["Reviewer counterexample requirement<br/>new test must be written and run directly<br/>by exact filename"]
+        REREVIEW["Reviewer re-reviews patched code<br/>with refreshed retrieval context"]
+        LOOP_DECISION{"Stop after re-review?"}
+        NEXT_ROUND["Persist round immediately<br/>update current code and critique"]
+        MAX_ROUNDS["MAX_ROUNDS reached<br/>stop iteration and proceed to final gate"]
+
+        HUMAN["Persist INCONCLUSIVE<br/>needs_human_review = true<br/>never auto-merge"]
+    end
+
+    subgraph GATE["5. Deterministic verification gate — sole merge authority"]
+        GATE_ENTRY["run_full_gate(candidate, target,<br/>baseline_repo_dir optional)"]
+        CUSTOM_GATE{"janus.yaml checks configured?"}
+        DEFAULT_CHECKS["Default checks in order"]
+        CUSTOM_CHECKS["Run configured custom commands<br/>exit code 0 = pass"]
+        LINT["ruff linter<br/>static check scoped to target file"]
+        TYPES["mypy type check<br/>scoped to target file"]
+        TEST_BASE["Run pytest on immutable baseline"]
+        TEST_CAND["Run pytest on candidate sandbox"]
+        TEST_COMPARE["Compare pytest node IDs<br/>ignore only pre-existing failures;<br/>new failures reject patch"]
+        TEST_NO_BASE["Without baseline: candidate pytest<br/>must pass all discovered tests"]
+        BANDIT["bandit security scan<br/>static check scoped to target file"]
+        GATE_FAILCLOSED["Fail closed on invalid sandbox path,<br/>unavailable Docker when required,<br/>baseline infrastructure failure, or timeout"]
+        GATE_RESULT{"Every required check passed?"}
+        GATE_PASS["Gate PASS"]
+        GATE_REJECT["Gate FAIL<br/>no merge authority granted"]
+    end
+
+    subgraph OUTCOME["6. Completion, integrations, and administration"]
+        MERGE_DECISION["merged = gate_passed<br/>AND not needs_human_review"]
+        PERSIST_FINAL["Persist final result<br/>status merged/rejected/error"]
+        NOTIFY["Best-effort notifications<br/>webhook outcome and GitHub status/comment"]
+        AUTO_CHECK["Auto-merge eligibility<br/>janus.yaml opt-in, gate passed,<br/>trusted branch + author, no human review"]
+        AUTO_MERGE["GitHub PR merge API<br/>installation-scoped credentials + SHA pinning"]
+        NO_MERGE["Rejected or human review required<br/>no automatic merge"]
+        ADMIN_SHELL["GET /admin<br/>UI shell only; no data access"]
+        ADMIN_AUTH["GET /admin/debates<br/>admin key role required<br/>missing => 401; tenant key => 403"]
+        ADMIN_FILTER["Cross-tenant summaries<br/>tenant_id/status/limit/offset filters"]
+        ADMIN_SAFE["Sensitive fields excluded<br/>no ticket, webhook URL, encrypted BYOK,<br/>transcripts, or gate command details"]
+    end
+
+    subgraph ISOLATION["7. Security and lifecycle invariants"]
+        CONTAINER["Optional containerized gate<br/>network none, read-only root,<br/>CPU/memory/PID limits, wall-clock timeout"]
+        ROLE["Credential roles are disjoint<br/>tenant keys cannot use admin routes;<br/>admin keys cannot authenticate tenant routes"]
+        HASH["API keys hashed in memory<br/>raw credentials never persisted or logged"]
+        THREADS["Blocking DB, gate, sandbox, and cleanup work<br/>offloaded from async event loops"]
+        CLEANUP["Close MCP toolsets with bounded cleanup<br/>remove candidate and baseline sandboxes"]
+    end
+
+    %% API path
+    START --> API_REQ
+    API_REQ --> API_AUTH
+    API_AUTH -->|valid tenant key| API_VALIDATE
+    API_AUTH -->|invalid or missing| ROLE
+    API_VALIDATE -->|valid| ENQUEUE
+    API_VALIDATE -->|rejected| API_AUTH
+    ENQUEUE --> DB
+    ENQUEUE --> QUEUE
+
+    %% GitHub path
+    START --> GH_EVENT
+    GH_EVENT --> GH_SECRET
+    GH_SECRET -->|installation event| GH_INSTALL
+    GH_SECRET -->|PR or comment event| GH_META
+    GH_SECRET -->|missing/invalid security config| GH_SAFE
+    GH_META --> GH_TRIGGER
+    GH_TRIGGER -->|manual or automatic allowed| GH_TARGET
+    GH_TRIGGER -->|automatic trigger not enabled| GH_SAFE
+    GH_META --> GH_SAFE
+    GH_TARGET --> ENQUEUE
+    GH_TARGET --> GH_ACK
+    GH_INSTALL --> DB
+
+    %% Worker path
+    QUEUE --> POLL
+    POLL --> CLAIM
+    CLAIM -->|claimed| CONCURRENCY
+    CLAIM -->|none available| POLL
+    CONCURRENCY --> LOAD
+    LOAD --> GH_MATERIALIZE
+    GH_MATERIALIZE -->|yes| MATERIALIZE
+    GH_MATERIALIZE -->|no| LOCAL_REPO
+    MATERIALIZE --> REPO_INPUT
+    LOCAL_REPO --> REPO_INPUT
+    REPO_INPUT --> REPO_CONFIG
+    REPO_CONFIG --> BYOK
+    BYOK --> ORCH_VALIDATE
+    LOAD --> WORKER_ERROR
+    WORKER_ERROR --> FINAL_DB
+    POLL --> ZOMBIE
+    SHUTDOWN --> POLL
+
+    %% Debate setup
+    ORCH_VALIDATE --> START_PERSIST
+    START_PERSIST --> SANDBOXES
+    SANDBOXES --> TARGET_READ
+    TARGET_READ --> LANGUAGE
+    LANGUAGE --> RETRIEVE
+    RETRIEVE --> BEHAVIOR
+    RETRIEVE --> REPO_CONTEXT
+    BEHAVIOR --> REVIEWER_BUILD
+    REPO_CONTEXT --> REVIEWER_BUILD
+    REVIEWER_BUILD --> REVIEWER_TOOLS
+    REVIEWER_TOOLS --> REVIEW_CALL
+    REVIEW_CALL --> INITIAL_VERDICT
+    INITIAL_VERDICT -->|PASS| PASS0
+    INITIAL_VERDICT -->|INCONCLUSIVE| INCONCLUSIVE0
+    INITIAL_VERDICT -->|ISSUE_FOUND| ISSUE0
+    REVIEW_CALL -->|runtime failure after retries| WORKER_ERROR
+
+    %% Initial verdict branches
+    PASS0 --> GATE_ENTRY
+    INCONCLUSIVE0 --> HUMAN
+    HUMAN --> PERSIST_FINAL
+    ISSUE0 --> PATCHER_BUILD
+    PATCHER_BUILD --> PATCHER_TOOLS
+    PATCHER_TOOLS --> PATCH
+    PATCH --> EXTRACT
+    EXTRACT --> WRITE
+    WRITE --> ROUND_GATE
+    ROUND_GATE --> COUNTEREXAMPLE
+    COUNTEREXAMPLE --> REREVIEW
+    REREVIEW --> LOOP_DECISION
+    LOOP_DECISION -->|PASS| GATE_ENTRY
+    LOOP_DECISION -->|INCONCLUSIVE| HUMAN
+    LOOP_DECISION -->|ISSUE_FOUND and rounds remain| NEXT_ROUND
+    LOOP_DECISION -->|issue remains at limit| MAX_ROUNDS
+    NEXT_ROUND --> ROUND_DB
+    NEXT_ROUND --> RETRIEVE
+    MAX_ROUNDS --> GATE_ENTRY
+    ROUND_GATE -->|gate details available to debate| ROUND_DB
+    ROUND_DB --> DB
+    REVIEW_CALL --> ROUND_DB
+
+    %% Gate branches
+    GATE_ENTRY --> CUSTOM_GATE
+    CUSTOM_GATE -->|yes| CUSTOM_CHECKS
+    CUSTOM_GATE -->|no| DEFAULT_CHECKS
+    DEFAULT_CHECKS --> LINT
+    LINT --> TYPES
+    TYPES --> TEST_BASE
+    TEST_BASE --> TEST_CAND
+    TEST_CAND --> TEST_COMPARE
+    TEST_COMPARE --> BANDIT
+    DEFAULT_CHECKS --> TEST_NO_BASE
+    TEST_NO_BASE --> BANDIT
+    CUSTOM_CHECKS --> GATE_RESULT
+    BANDIT --> GATE_RESULT
+    GATE_ENTRY --> GATE_FAILCLOSED
+    GATE_FAILCLOSED --> GATE_RESULT
+    GATE_RESULT -->|yes| GATE_PASS
+    GATE_RESULT -->|no| GATE_REJECT
+    GATE_PASS --> MERGE_DECISION
+    GATE_REJECT --> MERGE_DECISION
+
+    %% Completion and side effects
+    MERGE_DECISION --> PERSIST_FINAL
+    PERSIST_FINAL --> FINAL_DB
+    FINAL_DB --> NOTIFY
+    NOTIFY --> AUTO_CHECK
+    AUTO_CHECK -->|eligible| AUTO_MERGE
+    AUTO_CHECK -->|not eligible| NO_MERGE
+    AUTO_MERGE --> NO_MERGE
+    NOTIFY --> METRICS
+    PERSIST_FINAL --> METRICS
+
+    %% Admin path
+    START --> ADMIN_SHELL
+    ADMIN_SHELL --> ADMIN_AUTH
+    ADMIN_AUTH -->|valid admin key| ADMIN_FILTER
+    ADMIN_AUTH -->|missing or wrong role| ROLE
+    ADMIN_FILTER --> ADMIN_SAFE
+    ADMIN_SAFE --> DB
+
+    %% Invariants and cross-cutting controls
+    GATE_ENTRY -.-> CONTAINER
+    API_AUTH -.-> HASH
+    ADMIN_AUTH -.-> ROLE
+    ENQUEUE -.-> THREADS
+    CLAIM -.-> THREADS
+    START_PERSIST -.-> THREADS
+    GATE_ENTRY -.-> THREADS
+    PERSIST_FINAL -.-> THREADS
+    CLEANUP -.-> THREADS
+    SANDBOXES -.-> CLEANUP
+    REVIEWER_TOOLS -.-> ISOLATION
+    PATCHER_TOOLS -.-> ISOLATION
+    GATE_REJECT -.-> NO_MERGE
+
+    classDef entry fill:#dbeafe,stroke:#2563eb,color:#111827
+    classDef security fill:#fee2e2,stroke:#dc2626,color:#111827
+    classDef storage fill:#ede9fe,stroke:#7c3aed,color:#111827
+    classDef agent fill:#dcfce7,stroke:#16a34a,color:#111827
+    classDef gate fill:#fef3c7,stroke:#d97706,color:#111827
+    classDef outcome fill:#cffafe,stroke:#0891b2,color:#111827
+    classDef decision fill:#f3f4f6,stroke:#4b5563,color:#111827
+
+    class API_REQ,GH_EVENT,ADMIN_SHELL entry
+    class API_AUTH,GH_SECRET,GH_SAFE,ROLE,HASH,CONTAINER,GATE_FAILCLOSED security
+    class DB,QUEUE,ROUND_DB,FINAL_DB,METRICS storage
+    class REVIEWER_BUILD,REVIEWER_TOOLS,REVIEW_CALL,PATCHER_BUILD,PATCHER_TOOLS,PATCH,REREVIEW,RETRIEVE,BEHAVIOR,REPO_CONTEXT agent
+    class GATE_ENTRY,DEFAULT_CHECKS,CUSTOM_CHECKS,LINT,TYPES,TEST_BASE,TEST_CAND,TEST_COMPARE,TEST_NO_BASE,BANDIT,GATE_PASS,GATE_REJECT gate
+    class PASS0,INCONCLUSIVE0,ISSUE0,INITIAL_VERDICT,GH_MATERIALIZE,CUSTOM_GATE,GATE_RESULT,LOOP_DECISION,MERGE_DECISION,AUTO_CHECK decision
+    class ENQUEUE,GH_TARGET,CLAIM,ORCH_VALIDATE,SANDBOXES,HUMAN,PERSIST_FINAL,NOTIFY,AUTO_MERGE,NO_MERGE,ADMIN_AUTH,ADMIN_FILTER,ADMIN_SAFE outcome
