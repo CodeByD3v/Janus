@@ -172,3 +172,39 @@ def test_format_repo_context_handles_empty_signals():
 
 def test_format_repo_context_handles_empty_dict():
     assert format_repo_context_for_prompt({}) == "No repository context available."
+
+
+# ---------------------------------------------------------------------------
+# Language-agnostic fallback
+# ---------------------------------------------------------------------------
+
+
+def test_call_graph_fallback_handles_typescript(temp_repo):
+    target = temp_repo / "service.ts"
+    target.write_text(
+        "export function calculateTotal(items: number[]) {\n"
+        "  return sumItems(items);\n"
+        "}\n"
+    )
+    (temp_repo / "consumer.ts").write_text(
+        "import { calculateTotal } from './service';\n"
+        "export const report = () => calculateTotal([]);\n"
+    )
+    context = retrieve_repo_context(
+        str(temp_repo), "service.ts", target.read_text()
+    )
+    assert "calculateTotal" in context["call_graph"]["defined_here"]
+    assert "consumer.ts" in context["call_graph"]["callers"]
+
+
+def test_test_conventions_supports_testing_directory_and_non_python_files(temp_repo):
+    shutil.rmtree(temp_repo / "tests")
+    testing_dir = temp_repo / "testing"
+    testing_dir.mkdir()
+    (testing_dir / "inventory.spec.ts").write_text(
+        "describe('inventory', () => { it('works', () => expect(true).toBe(true)); });\n"
+    )
+    context = retrieve_repo_context(
+        str(temp_repo), "service.ts", (temp_repo / "inventory.py").read_text()
+    )
+    assert any("inventory.spec.ts" in sample for sample in context["test_conventions"])

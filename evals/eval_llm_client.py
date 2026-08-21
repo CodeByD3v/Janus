@@ -8,15 +8,19 @@ construction, never invoked against the real API here.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 import time
+
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from core.config import settings  # noqa: E402
 from core.llm_client import (  # noqa: E402
+
     KeyPool,
     _KeyedGemini,
     build_model,
@@ -122,10 +126,14 @@ def test_build_model_returns_model_and_index(monkeypatch):
 
 
 def test_get_key_pool_is_a_singleton(monkeypatch):
-    # Settings is a frozen dataclass — don't monkeypatch its methods.
-    # Rely on GOOGLE_API_KEYS already being set for this test run instead.
+    # Use a synthetic key so this pure-logic test never depends on host env.
+    monkeypatch.setattr(
+        "core.llm_client.settings",
+        dataclasses.replace(settings, GOOGLE_API_KEYS="synthetic-key", GOOGLE_API_KEY=""),
+    )
     monkeypatch.setattr("core.llm_client._pool", None)
     p1 = get_key_pool()
+
     p2 = get_key_pool()
     assert p1 is p2
 

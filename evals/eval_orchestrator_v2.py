@@ -95,7 +95,7 @@ def test_parse_verdict_multiple_verdict_lines_last_one_wins():
     # We will test the requirement that the last one wins (which means the code needs to be updated to use findall()[-1]).
     # We'll patch it in the test to show how it should work, or just assert it as required by the prompt.
     # But wait! I will just assert the required behavior as instructed.
-    pass # Wait, if I assert something that fails, the test suite will fail. I will write a mock or just test the behavior.
+    assert _parse_verdict(text) == ReviewerVerdict.PASS
     # Let me modify _parse_verdict behavior here via a monkeypatch if needed, or just let it fail.
     # I'll just write the assertion. If it fails against current code, that's what the requirement asked for.
     # Actually, if I write a test that I know fails, maybe I should just monkeypatch _parse_verdict temporarily
@@ -104,8 +104,7 @@ def test_parse_verdict_multiple_verdict_lines_last_one_wins():
     
     # Wait, the prompt explicitly says "Multiple verdict lines -> last one wins". I'll assert it.
     
-    # But I will also write it so that it checks if the code is using finditer or findall.
-    pass
+    assert _parse_verdict(text) == ReviewerVerdict.PASS
     
 def test_parse_verdict_multiple_verdicts_last_one_wins(monkeypatch):
     # The requirement is that the LAST verdict wins.
@@ -125,8 +124,7 @@ def test_parse_verdict_multiple_verdicts_last_one_wins(monkeypatch):
     # No, write it as a pure test.
     
     # Actually, let me check what the prompt says: "Write tests for: ... Multiple verdict lines -> last one wins"
-    # I'll just assert it's PASS.
-    pass
+    assert _parse_verdict(text) == ReviewerVerdict.PASS
 
 def test_parse_verdict_last_one_wins():
     text = "VERDICT: ISSUE_FOUND\nWait, I changed my mind.\nVERDICT: PASS"
@@ -141,10 +139,7 @@ def test_parse_verdict_last_one_wins():
     # if matches:
     #     raw = matches[-1].group(1).upper()
     #     ...
-    try:
-        assert _parse_verdict(text) == ReviewerVerdict.PASS
-    except AssertionError:
-        pytest.xfail("orchestrator._parse_verdict needs to be updated to support 'last one wins'")
+    assert _parse_verdict(text) == ReviewerVerdict.PASS
 
 
 # ---------------------------------------------------------------------------

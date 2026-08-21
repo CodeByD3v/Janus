@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.config import ModelConfig
+
 @dataclass
 class CheckConfig:
     """A single validation check from janus.yaml."""
@@ -19,6 +21,9 @@ class RepoConfig:
     """Parsed janus.yaml. All fields have sensible defaults."""
     checks: list[CheckConfig] = field(default_factory=list)
     language: str = ""  # Auto-detected if empty (Phase 3)
+    test_patterns: list[str] = field(
+        default_factory=lambda: ["tests", "testing", "test", "__tests__", "spec"]
+    )
     # Phase 5 — per-repo model configuration (BYOK)
     model_provider: str = ""  # e.g. "openai", "anthropic"; empty = server default
     model_name: str = ""      # e.g. "gpt-4o", "claude-sonnet-4-20250514"; empty = server default
@@ -46,6 +51,16 @@ class RepoConfig:
                     timeout=int(c.get("timeout", 60)),
                 ))
 
+        tests_section = raw.get("tests", {})
+        configured_test_patterns = (
+            tests_section.get("directories", [])
+            if isinstance(tests_section, dict)
+            else []
+        )
+        test_patterns = raw.get("test_patterns", configured_test_patterns)
+        if not isinstance(test_patterns, list) or not all(isinstance(item, str) for item in test_patterns):
+            test_patterns = ["tests", "testing", "test", "__tests__", "spec"]
+
         # Model configuration from janus.yaml's 'model' section:
         #   model:
         #     provider: openai
@@ -67,8 +82,9 @@ class RepoConfig:
 
         return cls(
             checks=checks,
-            language=raw.get("language", ""),
-            model_provider=model_section.get("provider", ""),
+            language=str(raw.get("language", "")),
+            test_patterns=[str(item) for item in test_patterns],
+            model_provider=str(model_section.get("provider", "")),
             model_name=model_section.get("name", ""),
             auto_merge=bool(raw.get("auto_merge", False)),
             trigger=raw.get("trigger", "manual"),
@@ -85,7 +101,6 @@ class RepoConfig:
         """
         if not self.model_provider and not self.model_name:
             return None
-        from core.config import ModelConfig
         return ModelConfig(
             provider=self.model_provider or "google",
             model=self.model_name,

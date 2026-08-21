@@ -65,6 +65,16 @@ class CreateDebateRequest(BaseModel):
         max_length=64,
         description="Optional commit SHA the debate ran against, for reference only",
     )
+    pr_branch: Optional[str] = Field(
+        default=None,
+        max_length=256,
+        description="Pull-request head branch used by auto-merge allowlists",
+    )
+    pr_author: Optional[str] = Field(
+        default=None,
+        max_length=256,
+        description="Pull-request author used by auto-merge allowlists",
+    )
     webhook_url: Optional[str] = Field(
         default=None,
         max_length=2048,

@@ -31,6 +31,7 @@ that becomes a 422 (api/schemas.py) or a failed DebateResult
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from core.config import settings
@@ -81,10 +82,18 @@ def looks_like_path_traversal(target_file: str) -> bool:
     if not target_file or not target_file.strip():
         return True
 
-    candidate = Path(target_file)
-    if candidate.is_absolute():
+    normalized = target_file.replace("\\", "/")
+    # pathlib.Path follows the host OS. API input is portable text, so also
+    # reject POSIX-rooted paths, Windows drive paths, and UNC paths explicitly
+    # when the service happens to run on Windows.
+    if (
+        normalized.startswith("/")
+        or normalized.startswith("//")
+        or re.match(r"^[A-Za-z]:/", normalized) is not None
+        or Path(target_file).is_absolute()
+    ):
         return True
-    if ".." in candidate.parts:
+    if any(part == ".." for part in normalized.split("/")):
         return True
 
     return False

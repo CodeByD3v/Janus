@@ -28,13 +28,13 @@ quick navigation, not as stable anchors.
 | SSRF protection (webhooks) | Built, verified (DNS rebinding excluded — see §4) |
 | Zombie-session sweeper | Built, verified |
 | `_persist_session_start` upsert fix | Built, verified |
-| **Phase 1: Core Engine Restructure** | NOT STARTED |
-| **Phase 2: Generic Validation Interface** | NOT STARTED |
-| **Phase 3: Language-Agnostic Prompts** | NOT STARTED |
-| **Phase 4: Repository Context Generalization** | NOT STARTED |
-| **Phase 5: Multi-Provider LLM / BYOK** | NOT STARTED |
-| **Phase 6: GitHub App & Product Layer** | NOT STARTED |
-| **Phase 7: Auto-Merge** | NOT STARTED |
+| **Phase 1: Core Engine Restructure** | Implemented and regression-tested |
+| **Phase 2: Generic Validation Interface** | Implemented and regression-tested |
+| **Phase 3: Language-Agnostic Prompts** | Implemented and regression-tested |
+| **Phase 4: Repository Context Generalization** | Implemented; non-Python fallback regression-tested |
+| **Phase 5: Multi-Provider LLM / BYOK** | Implemented; provider credential validation hardened |
+| **Phase 6: GitHub App & Product Layer** | Implemented webhook flow; installation-scoped auth remains deployment hardening |
+| **Phase 7: Auto-Merge** | Implemented; allowlists now fail closed when metadata is absent |
 
 ---
 
@@ -1065,7 +1065,17 @@ GitHub App permissions.
 
 ---
 
-## 3. Unresolved from v1.0 — _persist_session_end
+## 3. Remaining deployment hardening
+
+The application-level Janus 2.0 phases are implemented. The GitHub integration
+currently uses the configured GitHub token for API operations; production
+installations that need per-tenant GitHub App isolation should add an
+installation-token provider and store installation credentials through a
+separate secrets manager. The deterministic gate, fork protection, trigger
+configuration, and auto-merge authorization do not depend on that future
+credential-provider seam.
+
+## 4. Unresolved from v1.0 — _persist_session_end
 
 **`_persist_session_end` was observed to not complete within the full
 worker process, in a live end-to-end test, after a real (failing) LLM call

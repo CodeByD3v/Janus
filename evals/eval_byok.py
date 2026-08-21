@@ -93,8 +93,12 @@ def test_build_model_for_config_litellm_missing():
 def test_build_model_for_config_no_api_key(monkeypatch):
     config = ModelConfig(provider="openai", model="gpt-4o")
     
-    # Mock settings to return empty API key
-    monkeypatch.setattr("core.llm_client.settings.byok_api_key", lambda c: "")
+    # Replace the frozen settings object rather than assigning to one of its
+    # methods, which would fail during monkeypatch teardown.
+    monkeypatch.setattr(
+        "core.llm_client.settings",
+        dataclasses.replace(settings, OPENAI_API_KEY=""),
+    )
     
     # Mock litellm to avoid import error
     mock_adk_models = MagicMock()

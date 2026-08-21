@@ -48,7 +48,7 @@ from typing import Any
 from google.adk.models import Gemini
 from google.genai import Client
 
-from core.config import settings
+from core.config import ModelConfig, settings
 from core.observability import get_logger
 
 logger = get_logger(__name__)
@@ -68,25 +68,19 @@ class _KeyedGemini(Gemini):
 
     @cached_property
     def api_client(self) -> Client:
-        base_url, api_version = self._base_url_and_api_version
-        kwargs_for_http_options: dict[str, Any] = {
-            "headers": self._tracking_headers(),
-            "retry_options": self.retry_options,
-            "base_url": base_url,
-        }
-        if api_version:
-            kwargs_for_http_options["api_version"] = api_version
+        """Construct a client using the ADK 1.3.0-compatible API.
 
+        The private ``_base_url_and_api_version`` helper exists only in newer
+        ADK releases. Janus pins ADK 1.3.0, whose Gemini client needs only the
+        tracking headers and optional explicit API key here.
+        """
         from google.genai import types as genai_types
 
         kwargs: dict[str, Any] = {
-            "http_options": genai_types.HttpOptions(**kwargs_for_http_options),
+            "http_options": genai_types.HttpOptions(headers=self._tracking_headers),
         }
-        if self.model.startswith("projects/"):
-            kwargs["enterprise"] = True
         if self.bound_api_key:
             kwargs["api_key"] = self.bound_api_key
-
         return Client(**kwargs)
 
 
@@ -215,8 +209,6 @@ def build_model_for_config(
     Raises RuntimeError if a non-Google provider is requested but
     litellm is not installed.
     """
-    from core.config import ModelConfig
-
     if model_config is None:
         model_config = ModelConfig()
 

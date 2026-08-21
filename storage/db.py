@@ -21,7 +21,7 @@ from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -95,13 +95,40 @@ def get_session() -> Generator[Session, None, None]:
 
 
 def run_migrations() -> None:
-    """Create all tables if they don't exist.
+    """Create tables and add missing additive columns.
 
-    For production, this should be replaced with Alembic migrations.
-    For now, this is sufficient for the first production cut.
+    ``create_all`` does not alter existing tables, so deployments that already
+    have a v1 database need the small additive migration below as well. All
+    statements are fixed, internal schema definitions; no user input is
+    interpolated into SQL.
     """
     logger.info("running_migrations", database_url=_sanitize_url(settings.DATABASE_URL))
     Base.metadata.create_all(_engine)
+
+    additive_columns = {
+        "debate_sessions": {
+            "reviewer_verdict": "VARCHAR(32)",
+            "needs_human_review": "BOOLEAN DEFAULT FALSE",
+            "model_provider": "VARCHAR(32)",
+            "model_name": "VARCHAR(128)",
+            "pr_branch": "VARCHAR(256)",
+            "pr_author": "VARCHAR(256)",
+        },
+        "debate_rounds": {
+            "reviewer_verdict": "VARCHAR(32)",
+        },
+    }
+    inspector = inspect(_engine)
+    with _engine.begin() as connection:
+        for table, columns in additive_columns.items():
+            existing = {column["name"] for column in inspector.get_columns(table)}
+            for column, sql_type in columns.items():
+                if column in existing:
+                    continue
+                connection.execute(
+                    text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+                )
+                logger.info("migration_column_added", table=table, column=column)
     logger.info("migrations_complete")
 
 

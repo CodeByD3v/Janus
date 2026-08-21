@@ -175,3 +175,14 @@ def test_execute_auto_merge_409_sha_mismatch(mock_settings, mock_client_cls):
     mock_client_cls.return_value = mock_client
 
     assert execute_auto_merge("owner/repo", 42, commit_sha="stale") is False
+
+
+
+def test_auto_merge_branch_allowlist_requires_branch_metadata():
+    rc = _config(auto_merge_branches=["dependabot/*"])
+    assert should_auto_merge(rc, merged=True, needs_human_review=False) is False
+
+
+def test_auto_merge_author_allowlist_requires_author_metadata():
+    rc = _config(auto_merge_authors=["dependabot[bot]"])
+    assert should_auto_merge(rc, merged=True, needs_human_review=False) is False

@@ -81,6 +81,8 @@ class DebateSession(Base):
     pr_repo: Optional[str] = Column(String(256), nullable=True)  # type: ignore[assignment]
     pr_number: Optional[int] = Column(Integer, nullable=True)  # type: ignore[assignment]
     commit_sha: Optional[str] = Column(String(64), nullable=True)  # type: ignore[assignment]
+    pr_branch: Optional[str] = Column(String(256), nullable=True)  # type: ignore[assignment]
+    pr_author: Optional[str] = Column(String(256), nullable=True)  # type: ignore[assignment]
     webhook_url: Optional[str] = Column(String(2048), nullable=True)  # type: ignore[assignment]
     # Janus 2.0 — Reviewer-first verdict tracking.
     # reviewer_verdict stores the final verdict from the last review round:
@@ -154,6 +156,8 @@ class DebateSession(Base):
             "pr_repo": self.pr_repo,
             "pr_number": self.pr_number,
             "commit_sha": self.commit_sha,
+            "pr_branch": self.pr_branch,
+            "pr_author": self.pr_author,
             "webhook_url": self.webhook_url,
             "reviewer_verdict": self.reviewer_verdict,
             "needs_human_review": self.needs_human_review,

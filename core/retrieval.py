@@ -79,7 +79,12 @@ def initialize_store() -> None:
     # Import ingest lazily to avoid circular dependency at module level
     from retrieval_pipeline.ingest import ingest_file
 
-    accepted, rejected = ingest_file(seed_path)
+    accepted, rejected = ingest_file(
+        seed_path,
+        chroma_persist_dir=settings.CHROMA_PERSIST_DIR,
+        collection_name=settings.CHROMA_COLLECTION,
+        embedding_model_name=settings.EMBEDDING_MODEL,
+    )
     logger.info(
         "seeding_complete",
         accepted=accepted,

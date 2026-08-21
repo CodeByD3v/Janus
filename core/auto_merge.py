@@ -61,27 +61,30 @@ def should_auto_merge(
         return False
 
     # 4. Branch pattern check (empty list = all branches allowed)
-    if repo_config.auto_merge_branches and pr_branch:
-        if not any(
+    if repo_config.auto_merge_branches and (
+        not pr_branch
+        or not any(
             fnmatch.fnmatch(pr_branch, pattern)
             for pattern in repo_config.auto_merge_branches
-        ):
-            logger.info(
-                "auto_merge_blocked_branch",
-                branch=pr_branch,
-                allowed_patterns=repo_config.auto_merge_branches,
-            )
-            return False
+        )
+    ):
+        logger.info(
+            "auto_merge_blocked_branch",
+            branch=pr_branch,
+            allowed_patterns=repo_config.auto_merge_branches,
+        )
+        return False
 
     # 5. Author check (empty list = all authors allowed)
-    if repo_config.auto_merge_authors and pr_author:
-        if pr_author not in repo_config.auto_merge_authors:
-            logger.info(
-                "auto_merge_blocked_author",
-                author=pr_author,
-                allowed_authors=repo_config.auto_merge_authors,
-            )
-            return False
+    if repo_config.auto_merge_authors and (
+        not pr_author or pr_author not in repo_config.auto_merge_authors
+    ):
+        logger.info(
+            "auto_merge_blocked_author",
+            author=pr_author,
+            allowed_authors=repo_config.auto_merge_authors,
+        )
+        return False
 
     return True
 

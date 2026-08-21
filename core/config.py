@@ -110,6 +110,9 @@ class Settings:
     # Users can also provide per-request keys via the API (Enterprise tier).
     OPENAI_API_KEY: str = field(default_factory=lambda: _optional("OPENAI_API_KEY", ""))
     ANTHROPIC_API_KEY: str = field(default_factory=lambda: _optional("ANTHROPIC_API_KEY", ""))
+    GROQ_API_KEY: str = field(default_factory=lambda: _optional("GROQ_API_KEY", ""))
+    NVIDIA_API_KEY: str = field(default_factory=lambda: _optional("NVIDIA_API_KEY", ""))
+    COHERE_API_KEY: str = field(default_factory=lambda: _optional("COHERE_API_KEY", ""))
 
     # --- Debate ---
     MAX_ROUNDS: int = field(default_factory=lambda: _optional_int("ADV_REVIEW_MAX_ROUNDS", 5))
@@ -296,9 +299,6 @@ class Settings:
     )
 
     # --- GitHub App (Phase 6) ---
-    GITHUB_WEBHOOK_SECRET: str = field(
-        default_factory=lambda: _optional("GITHUB_WEBHOOK_SECRET", "")
-    )
     GITHUB_APP_ID: str = field(
         default_factory=lambda: _optional("GITHUB_APP_ID", "")
     )
@@ -353,8 +353,23 @@ class Settings:
         _env_key_map = {
             "openai": self.OPENAI_API_KEY,
             "anthropic": self.ANTHROPIC_API_KEY,
+            "groq": self.GROQ_API_KEY,
+            "nvidia": self.NVIDIA_API_KEY,
+            "cohere": self.COHERE_API_KEY,
         }
         return _env_key_map.get(model_config.provider, "")
+
+    def has_llm_credentials(self) -> bool:
+        """Return whether at least one server-managed provider credential exists."""
+        return bool(self.google_api_keys()) or any(
+            (
+                self.OPENAI_API_KEY,
+                self.ANTHROPIC_API_KEY,
+                self.GROQ_API_KEY,
+                self.NVIDIA_API_KEY,
+                self.COHERE_API_KEY,
+            )
+        )
 
     def validate_for_api(self) -> None:
         """Validate settings required for the API server. Call at startup."""
@@ -365,19 +380,18 @@ class Settings:
         """Validate settings required for the worker. Call at startup."""
         if not self.DATABASE_URL:
             raise ValueError("DATABASE_URL is required for the worker")
-        if not self.google_api_keys():
+        if not self.has_llm_credentials():
             raise ValueError(
-                "At least one Google API key is required for the worker to "
-                "call the LLM API — set GOOGLE_API_KEYS (comma-separated) "
-                "or GOOGLE_API_KEY"
+                "At least one LLM provider credential is required for the worker "
+                "to call the LLM API — configure Google, OpenAI, Anthropic, "
+                "Groq, NVIDIA, or Cohere credentials"
             )
 
     def validate_for_debate(self) -> None:
         """Validate settings required to run a debate."""
-        if not self.google_api_keys():
+        if not self.has_llm_credentials():
             raise ValueError(
-                "At least one Google API key is required to run debates — "
-                "set GOOGLE_API_KEYS (comma-separated) or GOOGLE_API_KEY"
+                "At least one LLM provider credential is required to run debates"
             )
 
 

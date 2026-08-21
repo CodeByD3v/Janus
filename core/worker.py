@@ -163,6 +163,8 @@ class Worker:
                 tenant_id = session.tenant_id
                 pr_repo = session.pr_repo
                 pr_number = session.pr_number
+                pr_branch = session.pr_branch
+                pr_author = session.pr_author
                 webhook_url = session.webhook_url
                 model_provider = session.model_provider
                 model_name = session.model_name
@@ -234,6 +236,8 @@ class Worker:
                             repo_config=repo_config,
                             merged=result.merged,
                             needs_human_review=result.needs_human_review,
+                            pr_branch=pr_branch,
+                            pr_author=pr_author,
                         ):
                             # Load commit_sha from session for SHA pinning
                             with get_session() as db:

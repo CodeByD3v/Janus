@@ -119,6 +119,8 @@ def create_debate(
             pr_repo=body.pr_repo,
             pr_number=body.pr_number,
             commit_sha=body.commit_sha,
+            pr_branch=body.pr_branch,
+            pr_author=body.pr_author,
             webhook_url=body.webhook_url,
             model_provider=body.model_provider,
             model_name=body.model_name,

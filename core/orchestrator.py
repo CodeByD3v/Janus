@@ -48,9 +48,9 @@ from typing import Any, Awaitable, Callable
 from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
 
+from core import diagnostics
 from core.agents import build_patcher, build_reviewer
 from core.config import ModelConfig, settings
-from core import diagnostics
 from core.gate import run_full_gate, sandbox_copy
 from core.language import detect_language
 from core.llm_client import get_key_pool, is_rate_limit_error
@@ -66,7 +66,8 @@ CODE_BLOCK_RE = re.compile(r"```(?:\w+)?\s*\n(.*?)```", re.DOTALL)
 # Matches the structured verdict line emitted by the Reviewer per the
 # prompt contract in agents.py's REVIEWER_INSTRUCTION_TEMPLATE.
 VERDICT_RE = re.compile(
-    r"VERDICT:\s*(PASS|ISSUE_FOUND|INCONCLUSIVE)", re.IGNORECASE
+    r"VERDICT:\s*(PASS|ISSUE_FOUND|INCONCLUSIVE)(?![A-Z_])",
+    re.IGNORECASE,
 )
 
 
@@ -78,13 +79,16 @@ def _parse_verdict(reviewer_text: str) -> ReviewerVerdict:
     verdict-line prompt addition.  If neither matches, defaults to
     ISSUE_FOUND (conservative: assume something was flagged).
     """
-    match = VERDICT_RE.search(reviewer_text)
-    if match:
-        raw = match.group(1).upper()
+    # Models occasionally revise a verdict in the same response. The final
+    # explicit verdict is the one that reflects the model's settled answer.
+    matches = list(VERDICT_RE.finditer(reviewer_text))
+    if matches:
+        raw = matches[-1].group(1).upper()
         try:
             return ReviewerVerdict(raw)
         except ValueError:
             pass
+
     # Legacy fallback
     if "no further issues found" in reviewer_text.lower():
         return ReviewerVerdict.PASS
@@ -258,8 +262,9 @@ async def _ask(
             ):
                 if event.content and event.content.parts:
                     for part in event.content.parts:
-                        if getattr(part, "text", None):
-                            final_text += part.text
+                        part_text = getattr(part, "text", None)
+                        if isinstance(part_text, str) and part_text:
+                            final_text += part_text
 
             duration = time.monotonic() - start_time
             _circuit_breaker.record_success()
@@ -959,7 +964,7 @@ async def _run_debate_inner(
         )
 
         try:
-            patch_text, patcher_runner, patcher_session, patcher_key_index = await _ask(
+            patch_text, patcher_runner, patcher_session, next_key_index = await _ask(
                 patcher_runner,
                 patcher_session,
                 user_id,
@@ -968,7 +973,9 @@ async def _run_debate_inner(
                 key_index=patcher_key_index,
                 rebuild_on_rate_limit=_rebuild_patcher,
             )
+            patcher_key_index = next_key_index
         except RuntimeError as e:
+
             logger.error(
                 "debate_failed_patcher_fix",
                 debate_id=debate_id,
