@@ -53,6 +53,7 @@ into sandbox_copy() itself, not any call an agent makes directly):
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -167,6 +168,80 @@ def _run(cmd: list[str], cwd: Path, timeout: int = 60) -> tuple[int, str]:
             return 1, "GATE ERROR: Docker is required but unavailable. Failing securely."
         return _run_containerized(cmd, cwd, timeout)
     return _run_direct(cmd, cwd, timeout)
+
+
+_PYTEST_FAILURE_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
+
+
+def _pytest_failure_ids(detail: str) -> list[str]:
+    """Extract stable pytest node IDs from compact failure output."""
+    ids = {
+        match.group(1)
+        for line in detail.splitlines()
+        if (match := _PYTEST_FAILURE_RE.match(line.strip()))
+    }
+    return sorted(ids)
+
+
+def compare_test_results(
+    baseline: dict,
+    candidate: dict,
+) -> dict:
+    """Treat only newly failing pytest node IDs as gate failures.
+
+    A non-passing baseline without parseable failure IDs is treated as an
+    infrastructure/collection failure and remains fail-closed. This avoids
+    mistaking a broken test environment for pre-existing test debt.
+    """
+    baseline_ids = baseline.get("failure_ids", [])
+    candidate_ids = candidate.get("failure_ids", [])
+
+    if baseline.get("passed"):
+        return {
+            **candidate,
+            "baseline_passed": True,
+            "new_failure_ids": candidate_ids,
+        }
+    if not baseline_ids:
+        return {
+            **candidate,
+            "passed": False,
+            "baseline_passed": False,
+            "new_failure_ids": candidate_ids,
+            "detail": (
+                "Baseline test run failed without parseable test failure IDs; "
+                "refusing to ignore it.\n"
+                f"BASELINE:\n{baseline.get('detail', 'unknown failure')}\n"
+                f"CANDIDATE:\n{candidate.get('detail', 'unknown failure')}"
+            ),
+        }
+
+    new_failure_ids = sorted(set(candidate_ids) - set(baseline_ids))
+    candidate_passed = bool(candidate.get("passed"))
+    if candidate_passed or not new_failure_ids:
+        return {
+            **candidate,
+            "passed": True,
+            "baseline_passed": False,
+            "baseline_failure_ids": baseline_ids,
+            "new_failure_ids": new_failure_ids,
+            "detail": (
+                "Candidate introduced no new test failures; pre-existing "
+                f"baseline failures ignored: {', '.join(baseline_ids)}"
+            ),
+        }
+
+    return {
+        **candidate,
+        "passed": False,
+        "baseline_passed": False,
+        "baseline_failure_ids": baseline_ids,
+        "new_failure_ids": new_failure_ids,
+        "detail": (
+            "Candidate introduced new test failures: "
+            f"{', '.join(new_failure_ids)}\n{candidate.get('detail', '')}"
+        ),
+    }
 
 
 def sandbox_copy(repo_dir: str) -> Path:
@@ -322,13 +397,12 @@ def run_tests(repo_dir: str) -> dict:
     bug fixed earlier — and would silently stop catching genuine
     regressions in exchange for dodging pre-existing test debt.
 
-    This means the "gate conflates pre-existing repo debt with
-    patch-introduced regressions" problem, as verified on pytest-dev/
-    pluggy (5 tests failing on its own unmodified main), is NOT solved by
-    this scoping change for tests specifically — only for lint/type/
-    security. Solving it for tests requires comparing against a baseline
-    run of the unpatched repo, a materially different (and pricier)
-    mechanism than scoping, and remains open.
+    By default, this still runs the candidate suite and reports every
+    failure. `run_full_gate()` can additionally receive an immutable
+    `baseline_repo_dir`; in that mode it runs the baseline suite first and
+    ignores only candidate failures whose pytest node IDs were already present
+    in the baseline. Baseline collection/infrastructure failures without
+    parseable failure IDs remain fail-closed.
     """
     if _validate_sandbox_path(repo_dir) is None:
         return {
@@ -341,7 +415,12 @@ def run_tests(repo_dir: str) -> dict:
             ),
         }
     code, out = _run(["pytest", "-q"], cwd=Path(repo_dir))
-    return {"check": "tests", "passed": code == 0, "detail": out or "clean"}
+    return {
+        "check": "tests",
+        "passed": code == 0,
+        "detail": out or "clean",
+        "failure_ids": _pytest_failure_ids(out),
+    }
 
 
 def run_security_scan(repo_dir: str, target_file: str | None = None) -> dict:
@@ -375,7 +454,11 @@ def run_security_scan(repo_dir: str, target_file: str | None = None) -> dict:
     return {"check": "security_scan", "passed": code == 0, "detail": out or "clean"}
 
 
-def run_full_gate(repo_dir: str, target_file: str | None = None) -> dict:
+def run_full_gate(
+    repo_dir: str,
+    target_file: str | None = None,
+    baseline_repo_dir: str | None = None,
+) -> dict:
     """Run all validation checks. The patch only merges if every check passes.
 
     If the repository contains a janus.yaml with custom checks defined,
@@ -386,10 +469,16 @@ def run_full_gate(repo_dir: str, target_file: str | None = None) -> dict:
     When no janus.yaml exists (or it defines no checks), falls back to the
     original four Python checks: ruff, mypy, pytest, bandit.
 
-    target_file, when given, scopes the three static checks (lint, type,
+        target_file, when given, scopes the three static checks (lint, type,
     security) to just that file — see run_linter's docstring for why
-    that's sound given this system's architecture. run_tests always runs
-    the full suite regardless, by design — see run_tests's docstring.
+    that's sound given this system's architecture. run_tests always runs the
+    full suite regardless, by design — see run_tests's docstring.
+
+    baseline_repo_dir, when given, must be a separate immutable sandbox copied
+    from the repository before patching. The tests run there first, and only
+    failures newly introduced in repo_dir fail the test check. A baseline that
+    fails without parseable pytest failure IDs remains a hard gate failure.
+
     """
     sandbox_path = _validate_sandbox_path(repo_dir)
     if sandbox_path is None:
@@ -405,6 +494,22 @@ def run_full_gate(repo_dir: str, target_file: str | None = None) -> dict:
             }],
         }
 
+    baseline_path = None
+    if baseline_repo_dir is not None:
+        baseline_path = _validate_sandbox_path(baseline_repo_dir)
+        if baseline_path is None:
+            return {
+                "passed": False,
+                "checks": [{
+                    "check": "baseline_path",
+                    "passed": False,
+                    "detail": (
+                        "baseline_repo_dir does not resolve under the OS temp "
+                        "directory — refusing to compare test results."
+                    ),
+                }],
+            }
+
     # Check for per-repo configuration (janus.yaml) only after the sandbox
     # boundary has been validated. Custom commands are untrusted code too.
     from core.repo_config import load_repo_config
@@ -413,7 +518,12 @@ def run_full_gate(repo_dir: str, target_file: str | None = None) -> dict:
     config = load_repo_config(repo_dir)
     if config.checks:
         # janus.yaml defines custom checks — use those instead of defaults
-        result = run_checks(repo_dir, config, target_file)
+        result = run_checks(
+            repo_dir,
+            config,
+            target_file,
+            baseline_repo_dir=str(baseline_path) if baseline_path else None,
+        )
         logger.info(
             "gate_result",
             repo_dir=repo_dir,
@@ -428,9 +538,14 @@ def run_full_gate(repo_dir: str, target_file: str | None = None) -> dict:
     checks = [
         run_linter(repo_dir, target_file),
         run_type_check(repo_dir, target_file),
-        run_tests(repo_dir),
-        run_security_scan(repo_dir, target_file),
     ]
+    if baseline_repo_dir is not None:
+        baseline_tests = run_tests(str(baseline_path))
+        candidate_tests = run_tests(repo_dir)
+        checks.append(compare_test_results(baseline_tests, candidate_tests))
+    else:
+        checks.append(run_tests(repo_dir))
+    checks.append(run_security_scan(repo_dir, target_file))
     passed = all(c["passed"] for c in checks)
     logger.info(
         "gate_result",

@@ -98,6 +98,13 @@ These are now **CONFIGURABLE DEFAULTS**. If `janus.yaml` exists in the repositor
 {"passed": bool, "checks": [{"check": str, "passed": bool, "detail": str}, ...]}
 ```
 
+`run_full_gate(repo_dir, target_file=None, baseline_repo_dir=None)` optionally
+accepts an immutable sandbox copied before patching. When supplied, the tests
+run against both baseline and candidate; only newly appearing pytest node IDs
+fail the test check. Baseline infrastructure failures without parseable test
+IDs and invalid baseline paths fail closed. Calls that omit the baseline retain
+the original all-tests-must-pass behavior.
+
 ### Container isolation (when `USE_CONTAINERIZED_GATE=true`)
 Each gate command executes inside a fresh Docker container with:
 - `--network none` — no network access

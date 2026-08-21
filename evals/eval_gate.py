@@ -10,19 +10,21 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+
+# Ensure project root is importable
+import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-# Ensure project root is importable
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import settings as real_settings  # noqa: E402
 from core.gate import (  # noqa: E402
     _resolve_scoped_path,
+    compare_test_results,
     run_candidate_test,
     run_full_gate,
     run_linter,
@@ -270,6 +272,49 @@ class TestRunTests:
         result = run_tests(str(repo))
         assert result["check"] == "tests"
         assert result["passed"] is False
+        assert result["failure_ids"]
+
+    def test_preexisting_failures_are_ignored(self, tmp_path: Path) -> None:
+        baseline_dir = tmp_path / "baseline"
+        candidate_dir = tmp_path / "candidate"
+        baseline_dir.mkdir()
+        candidate_dir.mkdir()
+        baseline = _make_failing_test_repo(baseline_dir)
+        candidate = _make_failing_test_repo(candidate_dir)
+        result = compare_test_results(run_tests(str(baseline)), run_tests(str(candidate)))
+        assert result["passed"] is True
+        assert result["baseline_passed"] is False
+        assert result["new_failure_ids"] == []
+
+    def test_new_failure_is_rejected(self, tmp_path: Path) -> None:
+        baseline_dir = tmp_path / "baseline"
+        candidate_dir = tmp_path / "candidate"
+        baseline_dir.mkdir()
+        candidate_dir.mkdir()
+        baseline = _make_clean_repo(baseline_dir)
+        candidate = _make_clean_repo(candidate_dir)
+        (candidate / "tests" / "test_hello.py").write_text(
+            """from hello import greet
+
+
+def test_greet():
+    assert greet('world') == 'BROKEN'
+"""
+        )
+        baseline_result = run_tests(str(baseline))
+        candidate_result = run_tests(str(candidate))
+        assert baseline_result["passed"] is True
+        result = compare_test_results(baseline_result, candidate_result)
+        assert result["passed"] is False
+        assert result["new_failure_ids"]
+
+    def test_unparseable_baseline_failure_fails_closed(self) -> None:
+        result = compare_test_results(
+            {"check": "tests", "passed": False, "detail": "collection crashed"},
+            {"check": "tests", "passed": True, "detail": "clean", "failure_ids": []},
+        )
+        assert result["passed"] is False
+        assert "without parseable" in result["detail"]
 
 
 class TestRunSecurityScan:
@@ -408,6 +453,12 @@ class TestScopedChecks:
             "linter", "type_check", "tests", "security_scan"
         }
         assert result["passed"] is True
+
+    def test_full_gate_rejects_invalid_baseline_path(self, tmp_path: Path) -> None:
+        repo = _make_clean_repo(tmp_path)
+        result = run_full_gate(str(repo), baseline_repo_dir=str(Path.cwd()))
+        assert result["passed"] is False
+        assert result["checks"][0]["check"] == "baseline_path"
 
     def test_full_gate_without_target_file_still_scans_whole_repo(
         self, tmp_path: Path

@@ -17,6 +17,7 @@ quick navigation, not as stable anchors.
 |---|---|
 | REST API (enqueue, poll, health, metrics) | Built, verified |
 | Deterministic gate + container isolation | Built, verified |
+| Gate baseline diffing | Built, verified; only new pytest failures reject a patch |
 | Gate check scoping (lint/type/security → target_file) | Built, verified |
 | Reviewer counterexample execution (`run_candidate_test`) | Built, verified |
 | Behavioral retrieval | Built, verified |
@@ -1252,24 +1253,21 @@ from everything else in this project so far.
 building visibility tooling for a user that doesn't exist yet is exactly
 the kind of premature breadth this project has otherwise avoided.
 
-### Gate baseline diffing
-`run_tests` runs the full suite, unscoped, by design (see
-`ARCHITECTURE.md` §5.3 for why scoping it would be unsound). The
-consequence: a repo with pre-existing failing tests unrelated to any patch
-can never pass the gate — confirmed concretely against a real external
-repo (`pytest-dev/pluggy`, which fails 5 tests on its own unmodified
-`main`).
+### Gate baseline diffing — implemented
+`run_tests` still executes the full suite, unscoped, because narrowing runtime
+coverage to a target file would be unsound. Debate execution now creates an
+immutable pre-patch sandbox and passes it to `run_full_gate` as
+`baseline_repo_dir`. The gate runs the baseline suite and candidate suite,
+extracts stable pytest node IDs, and rejects only failures newly introduced by
+the candidate patch. Pre-existing failures are retained as diagnostic metadata
+but do not unfairly reject the patch.
 
-The correct fix is a different mechanism entirely from scoping: run the
-gate once against the *unpatched* code at debate start, capture that as a
-baseline, and only fail the final gate on genuinely *new* failures the
-patch introduced. This changes `run_full_gate`'s contract (it needs a
-baseline to diff against, not just a single snapshot) and costs an extra
-full gate run per debate — real, scoped work, not a quick patch.
-
-**Revisit when**: this is prioritized against the other open items —
-it's a real product decision (how much gate cost per debate is acceptable
-for this correctness gain), not purely an engineering one.
+Baseline collection and infrastructure failures without parseable pytest
+failure IDs remain fail-closed. Invalid baseline paths are rejected before any
+validation runs. The standalone and MCP-facing gate calls remain backward
+compatible: without a baseline, they preserve the original all-tests-must-pass
+behavior. Regression tests cover pre-existing failures, newly introduced
+failures, unparseable baseline failures, and invalid baseline paths.
 
 ## 5. Suggested implementation order
 

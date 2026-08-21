@@ -627,15 +627,22 @@ async def run_debate(
     await _persist_with_timeout(_persist_session_start, debate_id, repo_dir, target_file, ticket, tenant_id)
 
 
-    sandbox = sandbox_copy(repo_dir)
+    sandbox: Path | None = None
+    baseline_sandbox: Path | None = None
     try:
+        sandbox = await asyncio.to_thread(sandbox_copy, repo_dir)
+        baseline_sandbox = await asyncio.to_thread(sandbox_copy, repo_dir)
         return await _run_debate_inner(
             repo_dir, target_file, ticket, debate_id, tenant_id,
-            sandbox, cost_tracker, model_config,
+            sandbox, baseline_sandbox, cost_tracker, model_config,
         )
     finally:
         import shutil
-        shutil.rmtree(sandbox, ignore_errors=True)
+        if baseline_sandbox is not None:
+            shutil.rmtree(baseline_sandbox, ignore_errors=True)
+        if sandbox is not None:
+            shutil.rmtree(sandbox, ignore_errors=True)
+
 
 async def _run_debate_inner(
     repo_dir: str,
@@ -644,6 +651,7 @@ async def _run_debate_inner(
     debate_id: str,
     tenant_id: str | None,
     sandbox: Path,
+    baseline_sandbox: Path,
     cost_tracker: CostTracker,
     model_config: ModelConfig | None = None,
 ) -> DebateResult:
@@ -862,7 +870,13 @@ async def _run_debate_inner(
     # ---------------------------------------------------------------
     if verdict == ReviewerVerdict.PASS:
         logger.info("reviewer_passed", debate_id=debate_id)
-        final_gate = run_full_gate(str(sandbox), target_file)
+        final_gate = await asyncio.to_thread(
+            run_full_gate,
+            str(sandbox),
+            target_file,
+            baseline_repo_dir=str(baseline_sandbox),
+        )
+
         result.final_gate = final_gate
         result.merged = final_gate["passed"]
         result.cost = cost_tracker.to_dict()
@@ -1004,7 +1018,12 @@ async def _run_debate_inner(
 
         # -- Run validation on the patched code -------------------------
 
-        gate_result = run_full_gate(str(sandbox), target_file)
+        gate_result = await asyncio.to_thread(
+            run_full_gate,
+            str(sandbox),
+            target_file,
+            baseline_repo_dir=str(baseline_sandbox),
+        )
 
         # Track gate check pass/fail by type
         for check in gate_result.get("checks", []):
@@ -1098,9 +1117,15 @@ async def _run_debate_inner(
     # PHASE 3: Final gate — sole merge authority
     # ===================================================================
 
-    final_gate = run_full_gate(str(sandbox), target_file)
+    final_gate = await asyncio.to_thread(
+        run_full_gate,
+        str(sandbox),
+        target_file,
+        baseline_repo_dir=str(baseline_sandbox),
+    )
 
     result.final_gate = final_gate
+
     result.merged = final_gate["passed"] and not result.needs_human_review
     result.cost = cost_tracker.to_dict()
 
