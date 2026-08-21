@@ -13,6 +13,7 @@ from typing import Any
 from core.gate import _run, _validate_sandbox_path  # Reuse gate execution and boundary checks
 from core.repo_config import CheckConfig, RepoConfig, load_repo_config
 
+
 @dataclass
 class CheckResult:
     check: str
