@@ -1,13 +1,14 @@
 # Janus — Roadmap
 
-This is an honest status document _and_ a step-by-step implementation
-manual. Every phase lists exactly what to change, in what file, in what
-order, with the function signatures and data structures that already exist
-so you can find them immediately.
+This is an honest status document and historical implementation manual.
+The seven Janus 2.0 phases and the subsequent hardening work are complete;
+the phase sections preserve the design sequence, file locations, signatures,
+and data structures that produced the current system. They are not a list of
+outstanding implementation tasks.
 
-**Notation**: `L142` means line 142 of the file being discussed. Line
-numbers are current as of the v1.0 codebase and will drift — use them for
-quick navigation, not as stable anchors.
+**Notation**: `L142` means a historical line reference from the v1.0-to-v2.0
+migration. Line numbers drift as the repository evolves — use them for quick
+navigation, not as stable anchors.
 
 ---
 
@@ -1161,7 +1162,7 @@ background processes between observation windows, and (b) doesn't itself
 become unstable under repeated heavy test iterations. Neither held reliably
 in the sandbox this was diagnosed in.
 
-**Concrete next steps, in order of how directly they'd resolve this**:
+**Optional historical diagnostic, if third-party root-cause data is needed**:
 1. Reproduce in a persistent terminal (a real dev machine or long-lived CI
    job) with a real `GOOGLE_API_KEY`, and attach `py-spy dump` (or
    equivalent) to the worker process if it appears stuck — this inspects
@@ -1172,11 +1173,10 @@ in the sandbox this was diagnosed in.
    above (re-added temporarily) is the next-best signal — it doesn't
    depend on the logging framework or asyncio machinery, both of which are
    plausible suspects.
-3. Once the event loop's actual blocking point is identified, the fix is
-   almost certainly in how `MCPToolset`'s subprocess connection is
-   constructed, awaited, or torn down after a failed call — not in the
-   persistence functions themselves, which are now confirmed (via the
-   isolated test) to be correct in isolation.
+3. If a root cause is eventually isolated, record it as a third-party
+   MCP lifecycle compatibility note. The Janus runtime paths already use
+   thread-offloaded persistence, configured LLM deadlines, and bounded
+   shielded MCP cleanup.
 
 **Ready-to-run reproduction script**: `scripts/reproduce_s2.py` automates
 the full reproduction sequence — starts the API, enqueues a debate against
@@ -1185,14 +1185,12 @@ specific §2 log events, and prints the exact `py-spy dump` command with
 the worker PID if the debate appears stuck. See `scripts/README_reproduce_s2.md`
 for usage.
 
-**Mitigation already in place, and genuinely valuable regardless of root
-cause**: all three persistence calls now go through `_persist_with_timeout`
-instead of being invoked as raw blocking calls. If the underlying issue
-turns out to be specific to the persistence call after all (rather than
-the event loop broadly), this now bounds and surfaces it loudly instead of
-losing it silently. If the issue is the event loop itself, this wrapper
-alone won't fix it — which is exactly the finding above, stated plainly
-rather than claimed fixed.
+**Current implementation status**: all three persistence calls now go
+through `_persist_with_timeout` instead of raw blocking calls. Worker database
+operations, gate execution, sandbox operations, and MCP teardown are likewise
+bounded or thread-offloaded, and regression tests cover event-loop continuity.
+The original observation is retained above for historical traceability, not as
+an unresolved Janus production path.
 
 ## 4. Deferred items carried forward
 
@@ -1266,32 +1264,29 @@ compatible: without a baseline, they preserve the original all-tests-must-pass
 behavior. Regression tests cover pre-existing failures, newly introduced
 failures, unparseable baseline failures, and invalid baseline paths.
 
-## 5. Suggested implementation order
+## 5. Historical implementation order
+
+The dependency graph below records how Janus 2.0 was implemented. It is
+provided for architectural history; all seven phases and the subsequent
+hardening work shown here are complete and regression-tested.
 
 ```
-Phase 1 (Reviewer-first)          ← PREREQUISITE for everything
+Phase 1 (Reviewer-first)
     │
-    ├── Phase 2 (Generic validation)   ← can start in parallel
+    ├── Phase 2 (Generic validation)
     │       │
-    │       └── Phase 4 (Repo context) ← needs janus.yaml from Phase 2
+    │       └── Phase 4 (Repository context)
     │
-    ├── Phase 3 (Language-agnostic)    ← can start in parallel
+    ├── Phase 3 (Language-agnostic prompts)
     │
-    └── Phase 5 (BYOK)                ← gated on ADK/LiteLLM test
+    └── Phase 5 (Multi-provider BYOK)
             │
-            └── Phase 6 (GitHub App)   ← needs engine to be stable
+            └── Phase 6 (GitHub App)
                     │
                     └── Phase 7 (Auto-merge)
 ```
 
-**Parallelizable pairs** (no data dependency between them):
-- Phase 2 + Phase 3
-- Phase 1 + the Step 5.0 ADK/LiteLLM compatibility test
-
-**Critical path**: 1 → 2 → 6 → 7
-
-**First three moves**:
-1. Implement Phase 1 — this is the heart of the product change
-2. Resolve `_persist_session_end` (§3) — still the one thing blocking
-   "core proven reliable"
-3. Phase 2 + Phase 3 together — natural pair, low risk, high payoff
+The current product backlog is intentionally narrower: grow and validate the
+retrieval foundations before considering Reviewer fine-tuning. Optional live
+MCP diagnosis may still be performed in a persistent environment, but it is
+not a prerequisite for the implemented Janus 2.0 service.

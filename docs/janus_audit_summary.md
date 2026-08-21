@@ -48,16 +48,33 @@ Recognizing the massive value of the secure, deterministic execution gate, we ex
 
 ---
 
-## ⚠️ Known Unfixed Vulnerabilities (For Your Backlog)
+## ✅ Audit Findings Closed Since This Review
 
-1. **Server-Side Request Forgery (SSRF) in Webhooks**
-   * **The Flaw**: In `core/notifications.py`, `requests.post(url)` fires a JSON payload to user-supplied `webhook_url`s.
-   * **Impact**: A malicious tenant can supply an internal IP address (e.g., `169.254.169.254/latest/meta-data/` on AWS) as their webhook URL to port-scan your internal VPC or trigger actions on unauthenticated internal microservices.
-   * **Recommendation**: Implement an SSRF protection layer (e.g., resolving the URL's IP address and blocking private/loopback/link-local CIDR ranges) before making requests.
+The following items were open when this historical audit was written and are
+now implemented and regression-tested:
 
-2. **Zombie Debate Sessions**
-   * **The Flaw**: If a worker process is killed abruptly (e.g., OOM kill, SIGKILL, hardware failure) while processing a debate, the debate's status will remain `running` in the database forever. 
-   * **Recommendation**: Implement a heartbeat mechanism or a "zombie sweeper" cron job that resets any debate stuck in `running` for more than 30 minutes back to `queued`.
+1. **Server-Side Request Forgery and DNS rebinding in webhooks** — webhook
+   destinations are resolved and validated against private, loopback,
+   link-local, reserved, multicast, and unspecified ranges. A validated-IP
+   Requests/urllib3 adapter pins the connection while preserving the original
+   hostname for HTTP Host and HTTPS SNI validation; redirects and proxies are
+   disabled.
+
+2. **Zombie debate sessions** — the worker periodically runs
+   `sweep_zombie_sessions`, which marks stale `running` sessions as `error`
+   instead of leaving them indefinitely active or blindly retrying poisoned
+   work.
+
+3. **Async persistence and MCP lifecycle risk** — synchronous persistence,
+   gate, sandbox, and database work is moved off the event loop; persistence
+   has bounded timeouts, and MCP teardown uses shielded bounded cleanup. The
+   regression suite covers event-loop continuity and teardown behavior. A
+   persistent environment may still be used for optional diagnosis of a
+   third-party MCP root cause, but no known indefinite wait remains in the
+   implemented Janus paths.
+
+The historical flaw descriptions above remain useful as audit context; they
+must not be read as the current security status of the repository.
 
 ---
 
@@ -78,9 +95,14 @@ The following security considerations apply to the Janus 2.0 architecture change
 ### 3. BYOK Key Storage (NEW)
 * **Context**: Enterprise users can bring their own LLM API keys.
 * **Risk**: User-provided API keys must be stored securely. Plaintext storage or logging would violate Hard Rule 5.
-* **Mitigation**: BYOK keys follow the same security model as Janus's own API keys — hashed at rest, never logged in plaintext, never included in error messages or debug output. Keys are stored encrypted per-installation, never in repository configuration files.
+* **Mitigation**: BYOK keys are encrypted at rest with the service credential boundary, decrypted only in worker memory when constructing the selected provider model, and never logged, returned in API responses, or written to repository configuration files. Janus API keys use one-way hashing because they are only validated; BYOK material must remain decryptable for provider calls.
 
-### 4. Multi-Provider Model Substitution
+### 4. Admin credential isolation (NEW)
+* **Context**: Operators need cross-tenant visibility without weakening ordinary tenant isolation.
+* **Mitigation**: `ADMIN_API_KEYS` is a separate, explicit role tier. Empty configuration disables admin access; tenant keys receive `403` on admin routes; admin keys are rejected by tenant authentication; and role collisions remove the credential rather than granting ambiguous privileges. Admin responses contain non-sensitive summaries only.
+
+### 5. Multi-Provider Model Substitution
+
 * **Context**: Different LLM providers have different safety profiles and capabilities.
 * **Risk**: A model swap could change the Reviewer's behavior in ways that weaken the adversarial dynamic (e.g., a model that's too agreeable to approve everything).
 * **Mitigation**: The deterministic gate remains the sole merge authority regardless of which model is used (Hard Rule 1). The model choice is invisible to the gate — it validates code correctness, not LLM output quality.

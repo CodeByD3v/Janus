@@ -2,8 +2,8 @@
 
 This document describes how Janus is actually built, as of this revision — not
 the aspirational version. Where something is a known gap or an open question
-rather than a settled design, it's marked as such. See `ROADMAP.md` for what's
-deliberately deferred and why.
+rather than a settled design, it's marked as such. See `Roadmap.md` for the
+current status and deliberately deferred work.
 
 ---
 
@@ -265,11 +265,12 @@ help the *Reviewer* anticipate. Narrowing test execution would require
 guessing a test-file naming convention (the same fragile pattern that caused
 the bug in §5.4) in exchange for silently losing real regression detection.
 
-**Known, explicitly unsolved gap**: because `run_tests` runs unscoped, a repo
-with pre-existing failing tests unrelated to any patch will never pass the
-gate — confirmed concretely on `pluggy`, which has 5 failing tests on its own
-unmodified `main`. Scoping doesn't fix this for tests; only comparing against
-a baseline run of the unpatched repo would. See `ROADMAP.md`.
+**Baseline-aware test handling**: `run_tests` still executes the full suite
+because runtime regressions can cross file boundaries. Debate execution now
+creates an immutable pre-patch baseline and `run_full_gate` compares stable
+pytest failure IDs between baseline and candidate. Pre-existing failures are
+retained as diagnostics but do not reject a patch; new failures, unparseable
+baseline failures, and invalid baseline paths fail closed. See `Roadmap.md`.
 
 ### 5.4 `write_candidate_test` / `run_candidate_test` — why two tools, not one
 
@@ -368,11 +369,12 @@ multicast, or unspecified — checked for every A/AAAA record, not just the
 first. This directly closes the classic cloud-metadata SSRF vector
 (`169.254.169.254`), verified against that exact address.
 
-**Documented, not closed**: DNS rebinding (a hostname resolves safely at
-check time, then a malicious DNS server returns a different address at
-request time). Closing this fully requires pinning the validated IP and
-connecting to it directly — real, more invasive work, tracked in
-`ROADMAP.md`.
+**DNS rebinding is closed**: after validating every resolved address,
+`post_webhook` passes the selected public IP to a custom
+`PinnedIPAdapter`. The adapter connects to that validated IP while
+preserving the original hostname for HTTP Host and HTTPS SNI/certificate
+validation. Redirects and environment proxies are disabled, and regression
+tests verify that the transport does not perform a second hostname lookup.
 
 ### 7.3 Sandbox escape via MCP tools
 
@@ -408,15 +410,17 @@ Two optional, independent side effects fired after a debate completes —
 a debate with neither configured behaves exactly as if this feature didn't
 exist:
 
-- **GitHub PR comment**, if `pr_repo` + `pr_number` were both provided.
-  Uses the Issues API (`/issues/{number}/comments`), not the Check Runs
-  API — a Check Run gives richer pass/fail UI but requires a GitHub App
-  installation-token flow, meaningfully more setup than a plain PAT. A
-  reasonable future upgrade if that UI is wanted badly enough (see
-  `ROADMAP.md`).
+- **GitHub PR comment and commit status**, if `pr_repo` + `pr_number` were
+  both provided. GitHub App mode uses installation-scoped credentials and
+  SHA-pinned operations; the webhook path also posts the initial
+  `No checks required` status where appropriate.
 - **Webhook POST**, if `webhook_url` was provided (or `DEFAULT_WEBHOOK_URL`
-  is configured server-side as a fallback).
-- *Future*: GitHub App integration (Phase 6) will enhance notifications and trigger modes.
+  is configured server-side as a fallback). DNS rebinding protection uses
+  validated-IP transport pinning.
+- **GitHub App triggers**, implemented in `api/github_app.py`, support
+  installation registration/revocation, `/janus review` comments, optional
+  automatic `janus.yaml` triggers, exact-commit materialization, and
+  fail-closed fork and metadata checks.
 
 Every notification call is best-effort: failures are logged and swallowed,
 never raised. A broken webhook or an expired GitHub token must not make an
@@ -497,8 +501,10 @@ combination on newer pytest versions):
 | `eval_llm_client.py` | Key pool round-robin, cooldown, rate-limit classification |
 | `eval_notifications.py` | PR comments, webhooks, SSRF protection |
 | `eval_path_safety.py` | repo_ref allowlist, target_file denylist |
-| `eval_api.py` | Auth, rate limiting, request validation, the enqueue/status happy path |
+| `eval_api.py` | Auth, role-aware admin access, rate limiting, request validation, admin visibility, and enqueue/status paths |
 | `eval_storage_db.py` | Zombie-session sweeper |
+| `eval_async_lifecycle.py` | MCP/toolset teardown bounds, thread offloading, and LLM stream deadlines |
+| `eval_github_credentials.py` | Installation-scoped token minting, tenant-aware caching, and legacy fallback |
 | `eval_reviewer.py` | Integration test — full debate against a real Gemini API key, marked `pytest.mark.integration` |
 
 A recurring theme worth naming: several real bugs (a broken relationship on
@@ -515,17 +521,21 @@ validates the seams between them.
 
 ---
 
-## 11. Known open items
+## 11. Current status and future work
 
-Tracked in detail in `ROADMAP.md`. Summary:
+The Janus 2.0 implementation, security hardening, GitHub App credential
+isolation, DNS-rebinding protection, gate baseline diffing, async lifecycle
+hardening, and admin dashboard are implemented and regression-tested. The
+remaining roadmap item is deliberate product work rather than an incomplete
+Janus 2.0 phase:
 
-- **Unresolved**: in a live end-to-end run, `_persist_session_end` was
-  observed to not complete within the full worker process after a real
-  (failing) LLM call sequence, despite completing correctly and quickly in
-  isolation. Root cause not yet isolated; the call is now wrapped so a
-  persist failure is logged rather than silently lost, but this is not
-  confirmed fixed.
-- **Roadmap Phases**: Phase 6 (GitHub App integration), Phase 7 (Auto-merge), and further hardening (DNS-rebinding hardening on webhooks, baseline-diffing the gate's test check, fine-tuning the Reviewer).
+- **Fine-tuning the Reviewer** remains deferred until the behavioral retrieval
+  corpus and repository-context signals are mature enough to justify a
+  learned-reviewer training effort.
+- **Live third-party MCP root-cause diagnosis** remains useful as optional
+  research. Persistence calls are thread-offloaded and bounded by timeouts,
+  MCP teardown is shielded and bounded, and regression tests cover event-loop
+  continuity; no known indefinite wait remains in the implemented paths.
 
 ---
 

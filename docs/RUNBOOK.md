@@ -2,31 +2,27 @@
 
 This is the operational reference: how to set this up, run it, test it, and
 operate it, exactly as the repo exists today. For *why* it's built this way,
-see `docs/ARCHITECTURE.md`. For what's deferred or still open, see
-`docs/Roadmap.md`.
+see `docs/ARCHITECTURE.md`. For the current status and deliberate future
+work, see `docs/Roadmap.md`.
 
-**One gap worth flagging immediately**: README.md's own Environment
-Variables table does not list `ALLOWED_REPO_ROOTS`. It defaults to empty,
-and the `repo_ref` validator is fail-closed — meaning if you follow the
-README's Quick Start exactly as written, your very first `POST /debates`
-request will fail with a 422, because nothing has told the service that
-`demo_repo` is an allowed path. Every setup section below includes it.
+`ALLOWED_REPO_ROOTS` is required for requests that reference local
+repositories because `repo_ref` validation is fail-closed. The setup examples
+below set it explicitly; the README environment table also documents it.
 
 ---
 
 ## 1. Current status, in one paragraph
 
-The Janus 2.0 migration is underway. Every core mechanism has been built and verified at the component level:
-the REST API, the deterministic gate (with container isolation and correct
-check scoping), both retrieval systems, multi-key LLM pooling, the deploy
-pipeline, notifications, and several real security fixes (sandbox-escape
-via MCP tools, SSRF on webhooks, zombie-session recovery). One real,
-serious bug (the `_persist_session_start` insert-vs-upsert collision) was
-found and fixed by actually running the full API+worker pipeline — the
-kind of bug no unit test catches. One item remains genuinely open: a
-persistence call was observed not completing within the full worker
-process after a failed LLM call sequence, and even a hard `asyncio.wait_for`
-timeout around it didn't fire — see §7 below and `docs/Roadmap.md` §2.
+Janus 2.0 is implemented and regression-tested. The REST API, deterministic
+gate with isolation and baseline diffing, both retrieval systems, multi-key
+and multi-provider LLM support, GitHub App integration, notifications,
+admin visibility, auto-merge controls, and the documented security fixes are
+in place. The `_persist_session_start` insert-vs-upsert collision was found
+through a real API+worker run and fixed. Async persistence is thread-offloaded
+and timeout-bounded, MCP teardown is shielded and bounded, and lifecycle
+regressions cover event-loop continuity. The only deliberate product work
+remaining is Reviewer fine-tuning; optional diagnosis of third-party MCP root
+causes remains documented in `docs/Roadmap.md`.
 
 ---
 
@@ -56,7 +52,10 @@ in a `.env` file depending on how you're running it:
 ```bash
 export GOOGLE_API_KEY=your-gemini-key          # needed to actually run a debate
 export API_KEYS=your-api-key:your-tenant-id     # needed to call the API at all
-export ALLOWED_REPO_ROOTS=/absolute/path/to/Janus   # needed for repo_ref to be accepted — see the gap noted above
+# Optional operator access; omit to keep the admin tier disabled.
+export ADMIN_API_KEYS=your-admin-key:operations
+export ALLOWED_REPO_ROOTS=/absolute/path/to/Janus   # required for local repo_ref validation
+
 ```
 
 `ALLOWED_REPO_ROOTS` must be an absolute path (or comma-separated list of
@@ -89,7 +88,8 @@ close.
 # 1. Secrets
 echo "GOOGLE_API_KEY=your-gemini-key" > .env
 echo "API_KEYS=your-api-key:your-tenant-id" >> .env
-echo "ALLOWED_REPO_ROOTS=$(pwd)" >> .env   # see the gap noted at the top of this file
+echo "ADMIN_API_KEYS=your-admin-key:operations" >> .env   # optional
+echo "ALLOWED_REPO_ROOTS=$(pwd)" >> .env
 
 # 2. Build the sandbox image once
 docker compose --profile build build sandbox-builder
@@ -105,15 +105,11 @@ and mount `/var/run/docker.sock` into the worker so it can spawn sandbox
 containers — Docker must be running on the host for this stack to work at
 all.
 
-Note: as written, `docker-compose.yml` only passes `GOOGLE_API_KEY` and
-`LOG_LEVEL` through to the containers from your `.env` — `API_KEYS` and
-`ALLOWED_REPO_ROOTS` are not forwarded by the compose file itself. Either
-add them to the `environment:` blocks for `api` and `worker` in
-`docker-compose.yml`, or export them directly before running
-`docker compose up` if your Docker Compose version passes through
-already-exported host variables (behavior varies by version — check with
-`docker compose config` to confirm what actually reaches the containers
-before assuming).
+The Compose file forwards `API_KEYS`, `ADMIN_API_KEYS`,
+`ALLOWED_REPO_ROOTS`, and the other required settings into the API service.
+Inspect the resolved configuration with `docker compose config` before
+starting a deployment; keep real credentials in the host `.env` and never
+commit them.
 
 ### 4.3 Manual run, no Docker (fastest local loop, gate runs unsandboxed)
 
@@ -314,14 +310,16 @@ duplicated here since that section is current and accurate.
 
 ---
 
-## 7. The one open item — diagnosing it yourself
+## 7. Async lifecycle hardening and optional diagnosis
 
-`docs/Roadmap.md` §2 documents a real, unresolved finding: after a failed
-LLM call sequence, a debate's final-state persistence appeared not to
-complete within the full worker process, and even a hard timeout wrapped
-around that call didn't fire. This needs a persistent terminal to properly
-diagnose (the environment it was found in tore down background processes
-between observation windows), which is why it's still open.
+The previously observed persistence/event-loop issue is mitigated in the
+current runtime. Persistence, worker database operations, gate execution, and
+sandbox work are moved off the event loop; LLM streams have configured
+deadlines; and MCP teardown is bounded with shielded cleanup. Regression tests
+cover event-loop continuity and sync/async teardown. The original diagnostic
+material remains below only if operators need to investigate a third-party MCP
+compatibility issue in a persistent environment; it is not a prerequisite for
+normal Janus operation.
 
 ```bash
 export GOOGLE_API_KEY=invalid-test-key   # fails fast — skip waiting on a real network timeout

@@ -28,6 +28,11 @@ storage, a queue-based worker, and observable infrastructure.
 - A retrieval pipeline that can be grown (batch ingestion) without redeployment
 - Production infrastructure: persistence, authenticated API, observability,
   concurrency, CI/CD
+- Async lifecycle hardening: blocking persistence, gate, sandbox, and worker
+  DB operations are offloaded; LLM deadlines and bounded MCP teardown prevent
+  indefinite event-loop waits
+- Fail-closed admin visibility tier with cross-tenant `GET /admin/debates`
+  summaries and `/admin` operator dashboard; tenant/admin roles are disjoint
 - GitHub App webhook handler (`/janus review` comment trigger, PR
   open/sync events, fork PR protection, HMAC-SHA256 signature
   verification) — see `api/github_app.py`

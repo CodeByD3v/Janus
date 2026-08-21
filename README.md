@@ -35,6 +35,13 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 - **Production infrastructure**: persistent DB (SQLite dev / Postgres prod),
   authenticated API, per-key rate limiting, structured logging, Prometheus
   metrics, cost tracking, queue-based workers with atomic claiming.
+- **GitHub App integration**: installation registration/revocation,
+  installation-scoped credentials, `/janus review` and automatic triggers,
+  exact-commit materialization, fail-closed fork protection, notifications,
+  and optional SHA-pinned auto-merge.
+- **Admin visibility**: a fail-closed admin credential tier, cross-tenant
+  debate summaries through `GET /admin/debates`, and the `/admin` operator
+  dashboard. Sensitive debate fields are excluded from admin responses.
 
 **What is explicitly future work:**
 
@@ -55,11 +62,16 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 │   ├── agents.py                      Patcher + Reviewer (MCP tool_filter asymmetry)
 │   ├── orchestrator.py                debate loop (retry, circuit breaker, persistence)
 │   ├── retrieval.py                   ChromaDB persistent vector store + retrieval
+│   ├── github_credentials.py          Installation-scoped GitHub App tokens
+│   ├── github_materializer.py         Exact-commit PR repository snapshots
+│   ├── notifications.py               Webhook and GitHub outcome delivery
+│   ├── auto_merge.py                  Fail-closed optional PR auto-merge
 │   └── worker.py                      DB-polling queue consumer (atomic claiming)
 │
 ├── api/
-│   ├── app.py                         FastAPI (POST /debates, GET /debates/{id}, healthz, metrics)
-│   ├── auth.py                        API key auth + per-key rate limiting
+│   ├── app.py                         FastAPI API + admin dashboard/listing
+│   ├── auth.py                        Role-aware tenant/admin API keys + rate limiting
+│   ├── github_app.py                  HMAC-verified GitHub webhook router
 │   └── schemas.py                     Pydantic request/response models
 │
 ├── storage/
@@ -73,6 +85,12 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 ├── data/
 │   └── real_catch_examples.seed.jsonl 25 curated "real catch" examples
 │
+├── docs/
+│   ├── ARCHITECTURE.md                Live architecture and security model
+│   ├── RUNBOOK.md                     Setup and operations guide
+│   ├── Roadmap.md                     Current status and deliberate future work
+│   └── JANUS_WORKFLOW.mmd             Detailed end-to-end Mermaid workflow
+│
 ├── mcp_server/server.py               FastMCP stdio server (gate tools for agents)
 ├── demo_repo/                         Intentionally buggy inventory module
 ├── evals/                             eval_gate, eval_retrieval, eval_api, eval_reviewer
@@ -83,6 +101,7 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 ├── docker-compose.prod.yml            Production stack (pulls CI-built images, GAP 16)
 ├── .github/workflows/                 CI (lint/type/evals) and deploy (build/push/migrate/roll out)
 └── AGENTS.md                          Full operational reference
+
 ```
 
 ---
@@ -106,6 +125,7 @@ deliberately weak. That gap is exactly what the Reviewer agent closes.
 # 1. Set secrets
 echo "GOOGLE_API_KEY=your-gemini-key" > .env
 echo "API_KEYS=your-api-key:your-tenant-id" >> .env
+echo "ALLOWED_REPO_ROOTS=$(pwd)" >> .env
 
 # 2. Build the sandbox image
 docker compose --profile build build sandbox-builder
@@ -195,8 +215,10 @@ command details.
 | **Structural asymmetry** | MCP `tool_filter` enforces different capabilities — the Reviewer cannot write source or call `run_full_gate` |
 | **Deterministic gate** | `core/gate.py` — ruff/mypy/pytest/bandit, optionally containerized with `--network none`, memory/CPU/PID limits |
 | **Persistence** | `storage/` — SQLAlchemy ORM, per-round persistence, survives crashes |
-| **API** | `api/app.py` — FastAPI, async debate enqueue, tenant-isolated reads |
-| **Auth + rate limiting** | `api/auth.py` — hashed API keys, per-key token bucket |
+| **API** | `api/app.py` — FastAPI enqueue/status routes, admin dashboard/listing, health, and metrics |
+| **Auth + rate limiting** | `api/auth.py` — hashed role-aware tenant/admin keys, disjoint privilege domains, per-key token bucket |
+| **GitHub App** | `api/github_app.py` + `core/github_credentials.py` — signed webhooks, installation-scoped tokens, exact-commit review inputs |
+
 | **Worker** | `core/worker.py` — DB-polling, atomic claiming, configurable concurrency |
 | **Observability** | `core/observability.py` — structured JSON logging, Prometheus metrics, cost tracking |
 | **Container isolation** | `docker/sandbox.Dockerfile` + `core/gate._run_containerized()` |
@@ -209,7 +231,8 @@ command details.
 |---|---|---|---|
 | `GOOGLE_API_KEY` | Worker | — | Gemini API key |
 | `API_KEYS` | API | — | `key:tenant,key:tenant` — tenant-scoped API keys |
-| `ADMIN_API_KEYS` | API | — | `key:operator,key:operator` — admin-only keys for `/admin/debates`; empty disables admin access |
+| `ADMIN_API_KEYS` | API | empty | `key:operator,key:operator` — admin-only keys for `/admin/debates`; empty disables admin access |
+| `ALLOWED_REPO_ROOTS` | API/worker | empty | Comma-separated absolute roots allowed for local `repo_ref` values; empty fails closed |
 | `DATABASE_URL` | Yes | `sqlite:///./adversarial_code_review.db` | DB connection |
 | `ADV_REVIEW_MODEL` | No | `gemini-2.5-flash` | LLM model |
 | `USE_CONTAINERIZED_GATE` | No | `false` | Docker sandbox |

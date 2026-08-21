@@ -2,7 +2,7 @@
 
 A deterministic, Docker-based secure execution sandbox for AI coding agents.
 
-This package extracts the core isolation engine from the [Janus](https://github.com/CodeByD3v/Janus) Adversarial Code Review system. It allows you to safely run untrusted, LLM-generated code (tests, linters, static analysis) inside a locked-down, resource-capped container.
+**Status: implemented and regression-tested.** This package extracts the core isolation engine from the [Janus](https://github.com/CodeByD3v/Janus) Adversarial Code Review system. It allows you to safely run untrusted, LLM-generated code (tests, linters, static analysis) inside a locked-down, resource-capped container. Janus uses the same isolation contract for its deterministic gate, while this package can be installed and used independently.
 
 ## Features
 - **Zero-Trust Execution**: Runs commands in a `--network none` container.
