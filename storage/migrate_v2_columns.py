@@ -77,6 +77,11 @@ def migrate_sqlite(db_path: str) -> None:
             "pr_author",
             "ALTER TABLE debate_sessions ADD COLUMN pr_author VARCHAR(256)",
         ),
+        (
+            "debate_sessions",
+            "github_installation_id",
+            "ALTER TABLE debate_sessions ADD COLUMN github_installation_id INTEGER",
+        ),
     ]
 
     applied = 0

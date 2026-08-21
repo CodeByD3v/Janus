@@ -114,6 +114,7 @@ def run_migrations() -> None:
             "model_api_key_encrypted": "TEXT",
             "pr_branch": "VARCHAR(256)",
             "pr_author": "VARCHAR(256)",
+            "github_installation_id": "INTEGER",
         },
         "debate_rounds": {
             "reviewer_verdict": "VARCHAR(32)",

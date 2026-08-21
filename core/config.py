@@ -306,6 +306,15 @@ class Settings:
     GITHUB_APP_ID: str = field(
         default_factory=lambda: _optional("GITHUB_APP_ID", "")
     )
+    GITHUB_APP_PRIVATE_KEY: str = field(
+        default_factory=lambda: _optional("GITHUB_APP_PRIVATE_KEY", "")
+    )
+    GITHUB_APP_JWT_TTL_SECONDS: int = field(
+        default_factory=lambda: _optional_int("GITHUB_APP_JWT_TTL_SECONDS", 540)
+    )
+    GITHUB_TOKEN_CACHE_SKEW_SECONDS: int = field(
+        default_factory=lambda: _optional_int("GITHUB_TOKEN_CACHE_SKEW_SECONDS", 60)
+    )
     GITHUB_REPO_CACHE_DIR: str = field(
         default_factory=lambda: _optional("GITHUB_REPO_CACHE_DIR", "/tmp/janus-github-repos")
     )

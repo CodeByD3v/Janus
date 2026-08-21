@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 from core.config import settings
+from core.github_credentials import github_headers
 from core.observability import get_logger
 from core.repo_config import RepoConfig
 
@@ -94,6 +95,8 @@ def execute_auto_merge(
     pr_number: int,
     commit_sha: str | None = None,
     merge_method: str = "squash",
+    installation_id: int | None = None,
+    tenant_id: str | None = None,
 ) -> bool:
     """Merge a PR via the GitHub API. Returns True on success.
 
@@ -104,17 +107,16 @@ def execute_auto_merge(
     does not affect the debate outcome — the PR simply stays open for
     manual merge.
     """
-    token = settings.GITHUB_TOKEN
-    if not token:
-        logger.warning("auto_merge_no_token", pr_repo=pr_repo, pr_number=pr_number)
+    headers = github_headers(
+        installation_id,
+        tenant_id,
+        legacy_token=getattr(settings, "GITHUB_TOKEN", None),
+    )
+    if headers is None:
+        logger.warning("auto_merge_no_github_credentials", pr_repo=pr_repo, pr_number=pr_number)
         return False
 
     url = f"{settings.GITHUB_API_URL}/repos/{pr_repo}/pulls/{pr_number}/merge"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
 
     body: dict[str, Any] = {
         "merge_method": merge_method,

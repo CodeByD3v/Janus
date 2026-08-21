@@ -62,6 +62,7 @@ if _cors_origins:
     )
 
 from api.github_app import github_router
+
 app.include_router(github_router)
 
 
@@ -127,6 +128,7 @@ def create_debate(
             commit_sha=body.commit_sha,
             pr_branch=body.pr_branch,
             pr_author=body.pr_author,
+            github_installation_id=body.github_installation_id,
             webhook_url=body.webhook_url,
             model_provider=body.model_provider,
             model_name=body.model_name,

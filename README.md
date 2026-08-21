@@ -201,6 +201,17 @@ curl http://localhost:8000/metrics
 | `LOG_LEVEL` | No | `INFO` | Log level |
 | `WORKER_POLL_INTERVAL` | No | `5` | Worker poll seconds |
 | `WORKER_MAX_CONCURRENT` | No | `4` | Max parallel debates |
+| `GITHUB_APP_ID` | For GitHub App mode | — | Numeric GitHub App identifier |
+| `GITHUB_APP_PRIVATE_KEY` | For GitHub App mode | — | PEM private key, injected through a secret manager; do not commit or log it |
+| `GITHUB_APP_JWT_TTL_SECONDS` | No | `540` | Short-lived App JWT lifetime |
+| `GITHUB_TOKEN_CACHE_SKEW_SECONDS` | No | `60` | Refresh installation tokens before expiry |
+| `GITHUB_TOKEN` | Legacy only | — | Static PAT fallback when no installation ID is supplied; not used by webhook-triggered App reviews |
+
+### GitHub App credential isolation
+
+For multi-tenant deployments, install the GitHub App separately wherever repository access is required. GitHub webhook payloads must contain an installation ID; Janus stores that ID with the debate and mints a short-lived installation token for each GitHub API operation. Tokens are cached only by `(tenant_id, installation_id)` and are never persisted in the database or written to logs. Installation creation and deletion events maintain the tenant-to-installation registry.
+
+Provide `GITHUB_APP_PRIVATE_KEY` through the deployment secret manager (or an equivalent runtime secret injection mechanism), with PEM newlines represented as `\\n` when the platform requires a single-line environment value. The private key is App-scoped; repository isolation is enforced by GitHub installation tokens. Direct API requests may include `github_installation_id` to select the same scoped path. If App mode is not configured, a static `GITHUB_TOKEN` may be used for single-tenant legacy deployments only.
 
 ---
 

@@ -49,12 +49,12 @@ class Base(DeclarativeBase):
 
 class GithubInstallation(Base):
     __tablename__ = "github_installations"
-    id: int = Column(Integer, primary_key=True, autoincrement=True)
-    installation_id: int = Column(Integer, nullable=False, unique=True, index=True)
-    account_login: str = Column(String(256), nullable=False)
-    account_type: str = Column(String(32), nullable=False)  # 'User' or 'Organization'
-    tenant_id: Optional[str] = Column(String(128), nullable=True)
-    created_at: datetime = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    id: int = Column(Integer, primary_key=True, autoincrement=True)  # type: ignore[assignment]
+    installation_id: int = Column(Integer, nullable=False, unique=True, index=True)  # type: ignore[assignment]
+    account_login: str = Column(String(256), nullable=False)  # type: ignore[assignment]
+    account_type: str = Column(String(32), nullable=False)  # type: ignore[assignment]  # 'User' or 'Organization'
+    tenant_id: Optional[str] = Column(String(128), nullable=True)  # type: ignore[assignment]
+    created_at: datetime = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))  # type: ignore[assignment]
 
 
 class DebateSession(Base):
@@ -83,6 +83,7 @@ class DebateSession(Base):
     commit_sha: Optional[str] = Column(String(64), nullable=True)  # type: ignore[assignment]
     pr_branch: Optional[str] = Column(String(256), nullable=True)  # type: ignore[assignment]
     pr_author: Optional[str] = Column(String(256), nullable=True)  # type: ignore[assignment]
+    github_installation_id: Optional[int] = Column(Integer, nullable=True, index=True)  # type: ignore[assignment]
     webhook_url: Optional[str] = Column(String(2048), nullable=True)  # type: ignore[assignment]
     # Janus 2.0 — Reviewer-first verdict tracking.
     # reviewer_verdict stores the final verdict from the last review round:

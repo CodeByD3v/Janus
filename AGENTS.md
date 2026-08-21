@@ -327,7 +327,11 @@ docker compose up --build
 | `OPENAI_API_KEY` | No | — | BYOK API key |
 | `ANTHROPIC_API_KEY` | No | — | BYOK API key |
 | `GITHUB_WEBHOOK_SECRET` | No | — | HMAC-SHA256 secret for verifying GitHub webhook signatures |
-| `GITHUB_APP_ID` | No | — | GitHub App ID for installation tracking |
+| `GITHUB_APP_ID` | For GitHub App mode | — | Numeric GitHub App ID for installation-token minting |
+| `GITHUB_APP_PRIVATE_KEY` | For GitHub App mode | — | PEM private key injected from a deployment secret manager; never persist it in the database or logs |
+| `GITHUB_APP_JWT_TTL_SECONDS` | No | `540` | Short-lived App JWT lifetime, capped by GitHub’s limit |
+| `GITHUB_TOKEN_CACHE_SKEW_SECONDS` | No | `60` | Refresh installation tokens before expiry |
+| `GITHUB_TOKEN` | Legacy only | — | Static PAT fallback for unscoped, single-tenant deployments |
 
 ### janus.yaml Configuration
 Per-repo configuration via `janus.yaml` allows developers to set custom validation checks, trigger modes, BYOK models (for enterprise users), and more.

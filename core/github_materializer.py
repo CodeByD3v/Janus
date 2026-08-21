@@ -10,18 +10,19 @@ from pathlib import Path
 import httpx
 
 from core.config import settings
+from core.github_credentials import github_headers
 from core.observability import get_logger
 
 logger = get_logger(__name__)
 
 
-def _github_headers() -> dict[str, str]:
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if settings.GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {settings.GITHUB_TOKEN}"
+def _github_headers(
+    installation_id: int | None = None,
+    tenant_id: str | None = None,
+) -> dict[str, str]:
+    headers = github_headers(installation_id, tenant_id)
+    if headers is None:
+        raise RuntimeError("No GitHub credentials are configured")
     return headers
 
 
@@ -32,7 +33,12 @@ def _safe_member_path(root: Path, member_name: str) -> Path:
     return candidate
 
 
-def materialize_github_repo(repo_slug: str, commit_sha: str) -> Path:
+def materialize_github_repo(
+    repo_slug: str,
+    commit_sha: str,
+    installation_id: int | None = None,
+    tenant_id: str | None = None,
+) -> Path:
     """Download an exact GitHub commit archive and return its extracted root.
 
     Only regular files and directories are extracted. Symlinks and hardlinks
@@ -52,7 +58,11 @@ def materialize_github_repo(repo_slug: str, commit_sha: str) -> Path:
     url = f"{settings.GITHUB_API_URL.rstrip('/')}/repos/{repo_slug}/tarball/{commit_sha}"
     try:
         with httpx.Client(timeout=60.0, follow_redirects=True) as client:
-            response = client.get(url, headers=_github_headers())
+            response = client.get(
+                url,
+                headers=_github_headers(installation_id, tenant_id),
+            )
+
         if response.status_code >= 300:
             raise RuntimeError(
                 f"GitHub archive download failed with status {response.status_code}"

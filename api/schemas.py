@@ -75,6 +75,11 @@ class CreateDebateRequest(BaseModel):
         max_length=256,
         description="Pull-request author used by auto-merge allowlists",
     )
+    github_installation_id: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="GitHub App installation owning this repository",
+    )
     webhook_url: Optional[str] = Field(
         default=None,
         max_length=2048,

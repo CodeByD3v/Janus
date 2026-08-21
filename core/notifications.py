@@ -62,6 +62,7 @@ from urllib.parse import urlparse
 import requests
 
 from core.config import settings
+from core.github_credentials import github_headers
 from core.observability import get_logger
 
 logger = get_logger(__name__)
@@ -168,7 +169,14 @@ def format_debate_summary(
     return "\n".join(lines)
 
 
-def post_github_pr_comment(pr_repo: str, pr_number: int, body: str) -> bool:
+def post_github_pr_comment(
+    pr_repo: str,
+    pr_number: int,
+    body: str,
+    installation_id: int | None = None,
+    tenant_id: str | None = None,
+) -> bool:
+
     """Post `body` as a comment on the given PR.
 
     Uses GitHub's Issues API (`/issues/{number}/comments`), which works
@@ -179,20 +187,29 @@ def post_github_pr_comment(pr_repo: str, pr_number: int, body: str) -> bool:
     (missing token, network error, non-2xx response) — the caller does
     not need to handle exceptions from this function.
     """
-    if not settings.GITHUB_TOKEN:
+    try:
+        headers = github_headers(
+            installation_id,
+            tenant_id,
+            legacy_token=getattr(settings, "GITHUB_TOKEN", None),
+        )
+    except Exception:
         logger.warning(
-            "github_notification_skipped_no_token",
+            "github_notification_credential_error",
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            exc_info=True,
+        )
+        return False
+    if headers is None:
+        logger.warning(
+            "github_notification_skipped_no_credentials",
             pr_repo=pr_repo,
             pr_number=pr_number,
         )
         return False
 
     url = f"{settings.GITHUB_API_URL}/repos/{pr_repo}/issues/{pr_number}/comments"
-    headers = {
-        "Authorization": f"Bearer {settings.GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
 
     try:
         resp = requests.post(
@@ -264,7 +281,10 @@ def notify_debate_outcome(
     pr_repo: str | None = None,
     pr_number: int | None = None,
     webhook_url: str | None = None,
+    installation_id: int | None = None,
+    tenant_id: str | None = None,
 ) -> None:
+
     """Fire both optional notification side effects for a completed debate.
 
     Both are independently optional:
@@ -284,7 +304,13 @@ def notify_debate_outcome(
     summary = format_debate_summary(debate_id, merged, rounds, final_gate)
 
     if pr_repo and pr_number:
-        post_github_pr_comment(pr_repo, pr_number, summary)
+        post_github_pr_comment(
+            pr_repo,
+            pr_number,
+            summary,
+            installation_id=installation_id,
+            tenant_id=tenant_id,
+        )
 
     effective_webhook = webhook_url or settings.DEFAULT_WEBHOOK_URL
     if effective_webhook:

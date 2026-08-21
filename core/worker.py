@@ -23,8 +23,8 @@ import asyncio
 import signal
 import sys
 import uuid
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 
 from core.config import ModelConfig, settings
 from core.observability import get_logger
@@ -168,6 +168,7 @@ class Worker:
                 pr_number = session.pr_number
                 pr_branch = session.pr_branch
                 pr_author = session.pr_author
+                github_installation_id = session.github_installation_id
                 webhook_url = session.webhook_url
                 model_provider = session.model_provider
                 model_name = session.model_name
@@ -189,7 +190,12 @@ class Worker:
                     if not session.commit_sha:
                         raise RuntimeError("GitHub review is missing a commit SHA")
                     from core.github_materializer import materialize_github_repo
-                    materialized_repo = materialize_github_repo(pr_repo, session.commit_sha)
+                    materialized_repo = materialize_github_repo(
+                        pr_repo,
+                        session.commit_sha,
+                        installation_id=github_installation_id,
+                        tenant_id=tenant_id,
+                    )
                     effective_repo_ref = str(materialized_repo)
 
                 # Import here to avoid circular imports at module level
@@ -245,6 +251,8 @@ class Worker:
                     pr_repo=pr_repo,
                     pr_number=pr_number,
                     webhook_url=webhook_url,
+                    installation_id=github_installation_id,
+                    tenant_id=tenant_id,
                 )
 
                 # Phase 7: Auto-merge if all conditions are met.
@@ -252,7 +260,7 @@ class Worker:
                 # the debate. Only attempted when there's a PR to merge.
                 if pr_repo and pr_number and result.merged:
                     try:
-                        from core.auto_merge import should_auto_merge, execute_auto_merge
+                        from core.auto_merge import execute_auto_merge, should_auto_merge
                         from core.repo_config import load_repo_config
 
                         repo_config = load_repo_config(effective_repo_ref)
@@ -271,6 +279,8 @@ class Worker:
                                 pr_repo=pr_repo,
                                 pr_number=pr_number,
                                 commit_sha=sha,
+                                installation_id=github_installation_id,
+                                tenant_id=tenant_id,
                             )
                     except Exception as e:
                         logger.warning(
