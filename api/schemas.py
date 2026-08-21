@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from core.path_safety import looks_like_path_traversal, validate_repo_ref
 
@@ -91,6 +91,10 @@ class CreateDebateRequest(BaseModel):
         max_length=128,
         description="Model name within the provider (e.g. 'gpt-4o', 'claude-sonnet-4-20250514')",
     )
+    model_api_key: Optional[SecretStr] = Field(
+        default=None,
+        description="Optional BYOK key; encrypted before database persistence and never returned",
+    )
 
     @field_validator("repo_ref")
     @classmethod
@@ -139,6 +143,11 @@ class CreateDebateRequest(BaseModel):
     def _pr_repo_and_number_together(self) -> "CreateDebateRequest":
         if (self.pr_repo is None) != (self.pr_number is None):
             raise ValueError("pr_repo and pr_number must be provided together, or not at all")
+        if self.model_api_key is not None:
+            if not self.model_provider or not self.model_name:
+                raise ValueError("model_api_key requires model_provider and model_name")
+            if self.model_provider == "google":
+                raise ValueError("model_api_key is only supported for non-Google providers")
         return self
 
     @field_validator("model_provider")

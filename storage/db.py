@@ -111,6 +111,7 @@ def run_migrations() -> None:
             "needs_human_review": "BOOLEAN DEFAULT FALSE",
             "model_provider": "VARCHAR(32)",
             "model_name": "VARCHAR(128)",
+            "model_api_key_encrypted": "TEXT",
             "pr_branch": "VARCHAR(256)",
             "pr_author": "VARCHAR(256)",
         },
@@ -157,7 +158,8 @@ def claim_queued_session(worker_id: str) -> Optional[str]:
     session = _SessionFactory()
     try:
         if settings.DATABASE_URL.startswith("sqlite"):
-            # SQLite: select first queued, then update
+            # Select a candidate, then condition the UPDATE on the row still
+            # being queued. If another worker won the race, rowcount is zero.
             debate = (
                 session.query(DebateSession)
                 .filter(DebateSession.status == "queued")
@@ -166,10 +168,26 @@ def claim_queued_session(worker_id: str) -> Optional[str]:
             )
             if debate is None:
                 return None
-            debate.status = "running"  # type: ignore[assignment]
-            debate.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+            debate_id = debate.id
+            updated = (
+                session.query(DebateSession)
+                .filter(
+                    DebateSession.id == debate_id,
+                    DebateSession.status == "queued",
+                )
+                .update(
+                    {
+                        DebateSession.status: "running",
+                        DebateSession.updated_at: datetime.now(timezone.utc),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if updated != 1:
+                session.rollback()
+                return None
             session.commit()
-            return debate.id
+            return debate_id
         else:
             # PostgreSQL: atomic UPDATE ... RETURNING
             result = session.execute(

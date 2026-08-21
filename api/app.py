@@ -75,6 +75,8 @@ async def startup() -> None:
     """Initialize DB and load API keys on startup."""
     run_migrations()
     key_store.load_from_env()
+    from core.retrieval import initialize_store
+    initialize_store()
     logger.info("api_started", host=settings.API_HOST, port=settings.API_PORT)
 
 
@@ -107,6 +109,10 @@ def create_debate(
     instead, so a slow query here can never freeze the whole server.
     """
     debate_id = str(uuid.uuid4())
+    encrypted_model_api_key = None
+    if body.model_api_key is not None:
+        from core.credentials import encrypt_secret
+        encrypted_model_api_key = encrypt_secret(body.model_api_key.get_secret_value())
 
     with get_session() as db:
         session = DebateSession(
@@ -124,6 +130,7 @@ def create_debate(
             webhook_url=body.webhook_url,
             model_provider=body.model_provider,
             model_name=body.model_name,
+            model_api_key_encrypted=encrypted_model_api_key,
         )
         db.add(session)
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -113,6 +114,9 @@ class Settings:
     GROQ_API_KEY: str = field(default_factory=lambda: _optional("GROQ_API_KEY", ""))
     NVIDIA_API_KEY: str = field(default_factory=lambda: _optional("NVIDIA_API_KEY", ""))
     COHERE_API_KEY: str = field(default_factory=lambda: _optional("COHERE_API_KEY", ""))
+    BYOK_ENCRYPTION_KEY: str = field(
+        default_factory=lambda: _optional("BYOK_ENCRYPTION_KEY", "")
+    )
 
     # --- Debate ---
     MAX_ROUNDS: int = field(default_factory=lambda: _optional_int("ADV_REVIEW_MAX_ROUNDS", 5))
@@ -302,12 +306,21 @@ class Settings:
     GITHUB_APP_ID: str = field(
         default_factory=lambda: _optional("GITHUB_APP_ID", "")
     )
+    GITHUB_REPO_CACHE_DIR: str = field(
+        default_factory=lambda: _optional("GITHUB_REPO_CACHE_DIR", "/tmp/janus-github-repos")
+    )
+    GITHUB_WEBHOOK_SECRET_REQUIRED: bool = field(
+        default_factory=lambda: (
+            _optional("GITHUB_WEBHOOK_SECRET_REQUIRED", "true").lower()
+            in ("true", "1", "yes")
+        )
+    )
 
     # --- MCP Server ---
     MCP_SERVER_SCRIPT: str = field(
         default_factory=lambda: _optional(
             "MCP_SERVER_SCRIPT",
-            str(os.path.join(os.path.dirname(__file__), "mcp_server", "server.py")),
+            str((Path(__file__).resolve().parent.parent / "mcp_server" / "server.py").resolve()),
         )
     )
 
@@ -380,6 +393,11 @@ class Settings:
         """Validate settings required for the worker. Call at startup."""
         if not self.DATABASE_URL:
             raise ValueError("DATABASE_URL is required for the worker")
+        mcp_script = Path(self.MCP_SERVER_SCRIPT).expanduser().resolve()
+        if not mcp_script.is_file():
+            raise ValueError(
+                f"MCP_SERVER_SCRIPT must point to an existing file: {mcp_script}"
+            )
         if not self.has_llm_credentials():
             raise ValueError(
                 "At least one LLM provider credential is required for the worker "

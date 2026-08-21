@@ -93,7 +93,9 @@ class DebateSession(Base):
     # Janus 2.0 — model configuration used for this debate (Phase 5 BYOK)
     model_provider: Optional[str] = Column(String(32), nullable=True)  # type: ignore[assignment]
     model_name: Optional[str] = Column(String(128), nullable=True)  # type: ignore[assignment]
-    created_at: datetime = Column(  # type: ignore[assignment]
+    model_api_key_encrypted: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
+    created_at: datetime = Column(
+  # type: ignore[assignment]
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),

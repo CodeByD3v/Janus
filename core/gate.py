@@ -391,7 +391,22 @@ def run_full_gate(repo_dir: str, target_file: str | None = None) -> dict:
     that's sound given this system's architecture. run_tests always runs
     the full suite regardless, by design — see run_tests's docstring.
     """
-    # Check for per-repo configuration (janus.yaml)
+    sandbox_path = _validate_sandbox_path(repo_dir)
+    if sandbox_path is None:
+        return {
+            "passed": False,
+            "checks": [{
+                "check": "sandbox_path",
+                "passed": False,
+                "detail": (
+                    "repo_dir does not resolve under the OS temp directory — "
+                    "refusing to run validation."
+                ),
+            }],
+        }
+
+    # Check for per-repo configuration (janus.yaml) only after the sandbox
+    # boundary has been validated. Custom commands are untrusted code too.
     from core.repo_config import load_repo_config
     from core.validation import run_checks
 
@@ -539,11 +554,17 @@ def run_candidate_test(repo_dir: str, filename: str) -> dict:
 
 if __name__ == "__main__":
     import sys
-    repo = str(Path(__file__).parent / "demo_repo")
-    result = run_full_gate(repo)
-    print("PASSED" if result["passed"] else "FAILED")
-    for c in result["checks"]:
-        print(f"  [{'OK' if c['passed'] else 'FAIL'}] {c['check']}")
-        if not c["passed"]:
-            print("    " + c["detail"].replace("\n", "\n    "))
-    sys.exit(0 if result["passed"] else 1)
+
+    source_repo = Path(__file__).resolve().parent.parent / "demo_repo"
+    sandbox = Path(tempfile.mkdtemp(prefix="janus_gate_demo_"))
+    try:
+        shutil.copytree(source_repo, sandbox, dirs_exist_ok=True)
+        result = run_full_gate(str(sandbox))
+        print("PASSED" if result["passed"] else "FAILED")
+        for c in result["checks"]:
+            print(f"  [{'OK' if c['passed'] else 'FAIL'}] {c['check']}")
+            if not c["passed"]:
+                print("    " + c["detail"].replace("\n", "\n    "))
+        sys.exit(0 if result["passed"] else 1)
+    finally:
+        shutil.rmtree(sandbox, ignore_errors=True)

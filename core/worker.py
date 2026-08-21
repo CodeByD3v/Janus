@@ -23,6 +23,7 @@ import asyncio
 import signal
 import sys
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
 
 from core.config import ModelConfig, settings
@@ -55,6 +56,8 @@ class Worker:
         """Main worker loop. Polls for queued sessions and dispatches debates."""
         settings.validate_for_worker()
         run_migrations()
+        from core.retrieval import initialize_store
+        initialize_store()
 
         logger.info(
             "worker_started",
@@ -168,6 +171,7 @@ class Worker:
                 webhook_url = session.webhook_url
                 model_provider = session.model_provider
                 model_name = session.model_name
+                model_api_key_encrypted = session.model_api_key_encrypted
 
             logger.info(
                 "debate_running",
@@ -176,19 +180,39 @@ class Worker:
                 target_file=target_file,
             )
 
+            materialized_repo: Path | None = None
+            effective_repo_ref = repo_ref
             try:
+                # GitHub webhook rows carry a slug, not a local filesystem path.
+                # Materialize the exact reviewed commit before sandbox_copy().
+                if pr_repo and pr_number and not Path(repo_ref).is_dir():
+                    if not session.commit_sha:
+                        raise RuntimeError("GitHub review is missing a commit SHA")
+                    from core.github_materializer import materialize_github_repo
+                    materialized_repo = materialize_github_repo(pr_repo, session.commit_sha)
+                    effective_repo_ref = str(materialized_repo)
+
                 # Import here to avoid circular imports at module level
                 from core.orchestrator import run_debate
+                from core.repo_config import load_repo_config
 
+                repo_config = load_repo_config(effective_repo_ref)
                 model_config = None
                 if model_provider and model_name:
+                    model_api_key = ""
+                    if model_api_key_encrypted:
+                        from core.credentials import decrypt_secret
+                        model_api_key = decrypt_secret(model_api_key_encrypted)
                     model_config = ModelConfig(
                         provider=model_provider,
                         model=model_name,
+                        api_key=model_api_key,
                     )
+                else:
+                    model_config = repo_config.to_model_config()
 
                 result = await run_debate(
-                    repo_dir=repo_ref,
+                    repo_dir=effective_repo_ref,
                     target_file=target_file,
                     ticket=ticket,
                     debate_id=session_id,
@@ -231,7 +255,7 @@ class Worker:
                         from core.auto_merge import should_auto_merge, execute_auto_merge
                         from core.repo_config import load_repo_config
 
-                        repo_config = load_repo_config(repo_ref)
+                        repo_config = load_repo_config(effective_repo_ref)
                         if should_auto_merge(
                             repo_config=repo_config,
                             merged=result.merged,
@@ -269,6 +293,10 @@ class Worker:
                         session.status = "error"  # type: ignore[assignment]
                         session.error_message = str(e)  # type: ignore[assignment]
                         session.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+            finally:
+                if materialized_repo is not None:
+                    from core.github_materializer import cleanup_materialized_repo
+                    cleanup_materialized_repo(materialized_repo)
 
     def _handle_shutdown(self) -> None:
         """Handle SIGINT/SIGTERM for graceful shutdown."""

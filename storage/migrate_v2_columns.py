@@ -64,6 +64,11 @@ def migrate_sqlite(db_path: str) -> None:
         ),
         (
             "debate_sessions",
+            "model_api_key_encrypted",
+            "ALTER TABLE debate_sessions ADD COLUMN model_api_key_encrypted TEXT",
+        ),
+        (
+            "debate_sessions",
             "pr_branch",
             "ALTER TABLE debate_sessions ADD COLUMN pr_branch VARCHAR(256)",
         ),

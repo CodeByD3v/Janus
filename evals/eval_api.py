@@ -55,7 +55,8 @@ def _setup_db():
 
 @pytest.fixture
 def client():
-    """Create a fresh TestClient for each test."""
+    """Create a fresh TestClient and rate-limit state for each test."""
+    rate_limiter._buckets.clear()
     return TestClient(app, raise_server_exceptions=False)
 
 

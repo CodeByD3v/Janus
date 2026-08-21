@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core.gate import _run  # Reuse existing container/direct execution
+from core.gate import _run, _validate_sandbox_path  # Reuse gate execution and boundary checks
 from core.repo_config import CheckConfig, RepoConfig, load_repo_config
 
 @dataclass
@@ -38,6 +38,16 @@ def run_checks(
     """Run all validation checks. Returns the same contract as run_full_gate."""
     if config is None:
         config = load_repo_config(repo_dir)
+
+    if _validate_sandbox_path(repo_dir) is None:
+        return {
+            "passed": False,
+            "checks": [{
+                "check": "sandbox_path",
+                "passed": False,
+                "detail": "repo_dir is not a validated temporary sandbox path",
+            }],
+        }
 
     results = []
     for check_config in config.checks:

@@ -199,6 +199,9 @@ async def github_webhook(
     """Handle issue-comment and pull-request webhook events."""
     payload = await request.body()
     secret = settings.GITHUB_WEBHOOK_SECRET
+    if settings.GITHUB_WEBHOOK_SECRET_REQUIRED and not secret:
+        logger.error("github_webhook_secret_not_configured")
+        raise HTTPException(status_code=503, detail="GitHub webhook integration is not configured")
     if secret and not _verify_webhook_signature(payload, x_hub_signature_256, secret):
         logger.warning("invalid_github_webhook_signature")
         raise HTTPException(status_code=401, detail="Invalid signature")
