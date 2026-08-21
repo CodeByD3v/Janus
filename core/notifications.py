@@ -41,15 +41,13 @@ URL whose resolved address is private/loopback/link-local/reserved/
 multicast/unspecified, checking ALL resolved addresses (a hostname can
 have multiple A/AAAA records) before allowing the request.
 
-Known residual risk, not closed by this fix: DNS rebinding — a resolved
-address can be validated safe here, then a malicious DNS server returns a
-different (unsafe) address at the moment `requests` itself re-resolves
-the same hostname to make the actual connection. Fully closing that
-requires pinning the specific validated IP and connecting to it directly
-(a custom transport adapter), which is real, more invasive work — this
-fix closes the direct, described threat (supplying an internal address
-as the webhook URL outright), not the more sophisticated DNS-rebinding
-variant.
+DNS rebinding is closed by resolving and validating the destination once,
+then passing that exact public IP to a custom urllib3 transport adapter. The
+adapter preserves the original hostname for the HTTP Host header and HTTPS
+SNI/certificate verification, but opens the socket only to the validated IP.
+Redirects and environment proxies are disabled so the request cannot escape
+the validated destination through either mechanism.
+
 """
 
 from __future__ import annotations
@@ -64,42 +62,45 @@ import requests
 from core.config import settings
 from core.github_credentials import github_headers
 from core.observability import get_logger
+from core.webhook_transport import PinnedIPAdapter
 
 logger = get_logger(__name__)
 
 _SUMMARY_SNIPPET_CHARS = 300
 
 
-def _is_safe_webhook_url(url: str) -> tuple[bool, str]:
-    """Resolve url's hostname and reject it if any resolved address is
-    private/loopback/link-local/reserved/multicast/unspecified.
+def _resolve_safe_webhook_ip(url: str) -> tuple[str | None, str]:
+    """Resolve, validate, and return the exact public IP to use for a request.
 
-    Returns (is_safe, reason) — reason is empty on success, or a
-    human-readable explanation of why the URL was rejected (safe to log,
-    contains no secrets).
+    The returned IP is passed directly to the transport. This makes the
+    validation and connection use the same DNS result, so a later DNS answer
+    cannot redirect the request to an internal address.
     """
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as e:
+        return None, f"invalid webhook URL: {e}"
+
     if parsed.scheme not in ("http", "https"):
-        return False, f"unsupported scheme: {parsed.scheme!r}"
+        return None, f"unsupported scheme: {parsed.scheme!r}"
 
     hostname = parsed.hostname
     if not hostname:
-        return False, "no hostname in URL"
+        return None, "no hostname in URL"
 
     try:
-        # getaddrinfo returns ALL A/AAAA records for the hostname — check
-        # every one, not just the first, since a hostname can resolve to
-        # multiple addresses and any one of them being unsafe is a risk.
-        addr_infos = socket.getaddrinfo(hostname, None)
-    except socket.gaierror as e:
-        return False, f"could not resolve hostname: {e}"
+        addr_infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except OSError as e:
+        return None, f"could not resolve hostname: {e}"
 
+    safe_ips: list[str] = []
     for _family, _type, _proto, _canonname, sockaddr in addr_infos:
         ip_str = sockaddr[0]
         try:
             ip = ipaddress.ip_address(ip_str)
         except ValueError:
-            return False, f"resolved to an unparseable address: {ip_str}"
+            return None, f"resolved to an unparseable address: {ip_str}"
 
         if (
             ip.is_private
@@ -109,12 +110,21 @@ def _is_safe_webhook_url(url: str) -> tuple[bool, str]:
             or ip.is_multicast
             or ip.is_unspecified
         ):
-            return False, (
+            return None, (
                 f"resolves to a private/internal address ({ip_str}) — "
                 "refusing to send a webhook request to it"
             )
+        safe_ips.append(ip_str)
 
-    return True, ""
+    if not safe_ips:
+        return None, "hostname resolved without any usable address"
+    return safe_ips[0], ""
+
+
+def _is_safe_webhook_url(url: str) -> tuple[bool, str]:
+    """Return whether a webhook URL resolves only to public addresses."""
+    pinned_ip, reason = _resolve_safe_webhook_ip(url)
+    return pinned_ip is not None, reason
 
 
 def format_debate_summary(
@@ -246,17 +256,28 @@ def post_webhook(url: str, payload: dict[str, Any]) -> bool:
 
     Never raises. Returns True on success, False on any failure —
     including a URL that resolves to a private/internal address, which
-    is rejected before any request is made. See this module's docstring
-    for the SSRF threat this closes and its documented residual risk
-    (DNS rebinding).
+    is rejected before any request is made. The validated address is pinned
+    for the actual socket connection, closing the DNS-rebinding gap.
     """
-    is_safe, reason = _is_safe_webhook_url(url)
-    if not is_safe:
+
+    pinned_ip, reason = _resolve_safe_webhook_ip(url)
+    if pinned_ip is None:
         logger.warning("webhook_notification_blocked_ssrf", url=url, reason=reason)
         return False
 
+    session = requests.Session()
+    session.trust_env = False
+    adapter = PinnedIPAdapter(pinned_ip)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     try:
-        resp = requests.post(url, json=payload, timeout=settings.NOTIFICATION_TIMEOUT_SECONDS)
+        resp = session.post(
+            url,
+            json=payload,
+            timeout=settings.NOTIFICATION_TIMEOUT_SECONDS,
+            allow_redirects=False,
+        )
+
         if resp.status_code >= 300:
             logger.warning(
                 "webhook_notification_failed",
@@ -271,9 +292,12 @@ def post_webhook(url: str, payload: dict[str, Any]) -> bool:
     except requests.RequestException as e:
         logger.warning("webhook_notification_error", url=url, error=str(e))
         return False
+    finally:
+        session.close()
 
 
 def notify_debate_outcome(
+
     debate_id: str,
     merged: bool,
     rounds: list[dict[str, Any]],

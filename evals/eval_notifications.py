@@ -23,18 +23,19 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.notifications import (  # noqa: E402
+from core.config import settings as real_settings
+from core.notifications import (
     _is_safe_webhook_url,
     format_debate_summary,
     notify_debate_outcome,
     post_github_pr_comment,
     post_webhook,
 )
-
-from core.config import settings as real_settings  # noqa: E402
+from core.webhook_transport import PinnedIPAdapter, _PinnedHTTPConnection
 
 
 def _settings_with(**overrides):
@@ -184,11 +185,12 @@ def test_pr_comment_never_raises_on_network_error(monkeypatch):
 
 def test_webhook_posts_payload():
     mock_response = MagicMock(status_code=200, text="")
-    with patch("core.notifications.requests.post", return_value=mock_response) as mock_post:
+    with patch("core.notifications.requests.Session.post", return_value=mock_response) as mock_post:
         result = post_webhook("https://example.com/hook", {"debate_id": "d1"})
 
     assert result is True
     args, kwargs = mock_post.call_args
+
     assert args[0] == "https://example.com/hook"
     assert kwargs["json"] == {"debate_id": "d1"}
 
@@ -197,9 +199,10 @@ def test_webhook_never_raises_on_network_error():
     import requests as real_requests
 
     with patch(
-        "core.notifications.requests.post",
+        "core.notifications.requests.Session.post",
         side_effect=real_requests.exceptions.Timeout("timed out"),
     ):
+
         result = post_webhook("https://example.com/hook", {})
 
     assert result is False
@@ -287,6 +290,15 @@ def test_is_safe_webhook_url_rejects_url_with_no_hostname():
     assert safe is False
 
 
+def test_is_safe_webhook_url_rejects_invalid_port_without_raising():
+    safe, reason = _is_safe_webhook_url("https://example.com:not-a-port/hook")
+    assert safe is False
+    assert "invalid webhook URL" in reason
+
+
+
+
+
 def test_post_webhook_blocks_before_making_any_request(monkeypatch):
     """The actual end-to-end contract: post_webhook must never call
     requests.post at all for an unsafe URL — not attempt the request and
@@ -295,20 +307,65 @@ def test_post_webhook_blocks_before_making_any_request(monkeypatch):
         "core.notifications.socket.getaddrinfo",
         lambda *a, **kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 0))],
     )
-    with patch("core.notifications.requests.post") as mock_post:
+    with patch("core.notifications.requests.Session.post") as mock_post:
         result = post_webhook(
             "http://attacker-controlled.example/hook", {"debate_id": "d1"}
         )
+
     assert result is False
     mock_post.assert_not_called()
 
 
+def test_post_webhook_uses_the_validated_ip_for_transport():
+    mock_response = MagicMock(status_code=200, text="")
+    with patch(
+        "core.notifications.PinnedIPAdapter", autospec=True
+    ) as mock_adapter, patch(
+        "core.notifications.requests.Session.post", return_value=mock_response
+    ) as mock_post:
+        result = post_webhook("https://example.com/hook", {"debate_id": "d1"})
+
+    assert result is True
+    mock_adapter.assert_called_once_with("8.8.8.8")
+    mock_post.assert_called_once()
+    assert mock_post.call_args.kwargs["allow_redirects"] is False
+
+
+def test_pinned_connection_does_not_resolve_hostname_again():
+    sock = MagicMock()
+    with patch(
+        "core.webhook_transport.urllib3_connection.create_connection",
+        return_value=sock,
+    ) as mock_connect:
+        connection = _PinnedHTTPConnection(
+            host="safe.example",
+            port=443,
+            pinned_ip="8.8.8.8",
+            timeout=5,
+        )
+        assert connection._new_conn() is sock
+
+    assert mock_connect.call_args.args[0] == ("8.8.8.8", 443)
+
+
+def test_pinned_adapter_supports_http_and_https_pools():
+    adapter = PinnedIPAdapter("8.8.8.8")
+    assert adapter.poolmanager.pool_classes_by_scheme["http"].__name__ == "_PinnedHTTPConnectionPool"
+    assert adapter.poolmanager.pool_classes_by_scheme["https"].__name__ == "_PinnedHTTPSConnectionPool"
+    request = requests.Request("GET", "https://safe.example/hook").prepare()
+    pool = adapter.get_connection_with_tls_context(request, verify=False, proxies={})
+    assert pool.host == "safe.example"
+    assert pool.conn_kw["pinned_ip"] == "8.8.8.8"
+    adapter.close()
+
+
 def test_post_webhook_still_works_for_a_safe_url():
+
     """Backward compatibility: the SSRF check must not break the
     legitimate, already-tested happy path above — pinned again here
     explicitly alongside the new SSRF tests for clarity."""
     mock_response = MagicMock(status_code=200, text="")
-    with patch("core.notifications.requests.post", return_value=mock_response) as mock_post:
+    with patch("core.notifications.requests.Session.post", return_value=mock_response) as mock_post:
         result = post_webhook("https://example.com/hook", {"debate_id": "d1"})
     assert result is True
     mock_post.assert_called_once()
@@ -363,7 +420,8 @@ def test_notify_posts_pr_comment_when_pr_reference_given(monkeypatch):
 
 def test_notify_posts_webhook_when_url_given():
     mock_response = MagicMock(status_code=200, text="")
-    with patch("core.notifications.requests.post", return_value=mock_response) as mock_post:
+    with patch("core.notifications.requests.Session.post", return_value=mock_response) as mock_post:
+
         notify_debate_outcome(
             debate_id="d1",
             merged=False,
@@ -384,7 +442,8 @@ def test_notify_falls_back_to_default_webhook(monkeypatch):
         _settings_with(DEFAULT_WEBHOOK_URL="https://default.example.com/hook"),
     )
     mock_response = MagicMock(status_code=200, text="")
-    with patch("core.notifications.requests.post", return_value=mock_response) as mock_post:
+    with patch("core.notifications.requests.Session.post", return_value=mock_response) as mock_post:
+
         notify_debate_outcome(
             debate_id="d1",
             merged=True,
@@ -402,8 +461,12 @@ def test_notify_falls_back_to_default_webhook(monkeypatch):
 def test_notify_fires_both_when_both_configured(monkeypatch):
     monkeypatch.setattr("core.notifications.settings", _settings_with(GITHUB_TOKEN="fake-token"))
     mock_response = MagicMock(status_code=200, text="")
-    with patch("core.notifications.requests.post", return_value=mock_response) as mock_post:
+
+    with patch("core.notifications.requests.post", return_value=mock_response) as mock_post, patch(
+        "core.notifications.requests.Session.post", return_value=mock_response
+    ) as mock_webhook:
         notify_debate_outcome(
+
             debate_id="d1",
             merged=True,
             rounds=[],
@@ -413,7 +476,8 @@ def test_notify_fires_both_when_both_configured(monkeypatch):
             webhook_url="https://example.com/hook",
         )
 
-    assert mock_post.call_count == 2
+    mock_post.assert_called_once()
+    mock_webhook.assert_called_once()
 
 
 def test_notify_requires_both_pr_repo_and_pr_number(monkeypatch):
