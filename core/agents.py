@@ -33,6 +33,10 @@ without ever handling the raw key.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+from typing import Any
+
 from google.adk.agents import LlmAgent
 from google.adk.tools.mcp_tool import MCPToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
@@ -41,33 +45,38 @@ from mcp import StdioServerParameters
 from core.config import ModelConfig, settings
 from core.llm_client import build_model, build_model_for_config
 
-_gate_toolset_full = MCPToolset(
-    connection_params=StdioConnectionParams(
-        server_params=StdioServerParameters(
-            command="python3",
-            args=[settings.MCP_SERVER_SCRIPT],
+
+def _build_toolset(tool_filter: list[str]) -> MCPToolset:
+    """Create an MCPToolset owned by one agent instance.
+
+    Toolsets own stdio subprocesses and sessions. Keeping them per-agent
+    prevents concurrent debates from sharing one subprocess or teardown path.
+    """
+    return MCPToolset(
+        connection_params=StdioConnectionParams(
+            server_params=StdioServerParameters(
+                command="python3",
+                args=[settings.MCP_SERVER_SCRIPT],
+            ),
+            timeout=120,
         ),
-        timeout=120,
-    ),
-    tool_filter=[
+        tool_filter=tool_filter,
+    )
+
+
+def _build_gate_toolset() -> MCPToolset:
+    return _build_toolset([
         "sandbox_copy",
         "run_linter",
         "run_type_check",
         "run_tests",
         "run_security_scan",
         "run_full_gate",
-    ],
-)
+    ])
 
-_reviewer_toolset = MCPToolset(
-    connection_params=StdioConnectionParams(
-        server_params=StdioServerParameters(
-            command="python3",
-            args=[settings.MCP_SERVER_SCRIPT],
-        ),
-        timeout=120,
-    ),
-    tool_filter=[
+
+def _build_reviewer_toolset() -> MCPToolset:
+    return _build_toolset([
         "sandbox_copy",
         "write_candidate_test",
         "run_candidate_test",
@@ -75,8 +84,22 @@ _reviewer_toolset = MCPToolset(
         "run_linter",
         "run_type_check",
         "run_security_scan",
-    ],
-)
+    ])
+
+
+async def close_agent_toolsets(agent: LlmAgent, timeout: float = 2.0) -> None:
+    """Close all async toolsets owned by an agent without blocking shutdown."""
+    for tool in getattr(agent, "tools", []):
+        close = getattr(tool, "close", None)
+        if close is None:
+            continue
+        try:
+            result: Any = close()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=timeout)
+        except Exception:
+            # Cleanup must never mask the debate result.
+            continue
 
 PATCHER_INSTRUCTION = """You are the Patcher agent in an adversarial code
 review loop. You are given a ticket describing a bug or feature, and the
@@ -183,7 +206,7 @@ def build_patcher(
         name="patcher",
         description="Proposes and revises code patches for a given ticket.",
         instruction=instruction,
-        tools=[_gate_toolset_full],
+        tools=[_build_gate_toolset()],
     )
     return agent, key_index
 
@@ -233,6 +256,6 @@ def build_reviewer(
             "grounded in retrieved historical examples and repository context."
         ),
         instruction=instruction,
-        tools=[_reviewer_toolset],
+        tools=[_build_reviewer_toolset()],
     )
     return agent, key_index

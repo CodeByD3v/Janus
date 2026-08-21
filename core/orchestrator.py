@@ -49,7 +49,7 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
 
 from core import diagnostics
-from core.agents import build_patcher, build_reviewer
+from core.agents import build_patcher, build_reviewer, close_agent_toolsets
 from core.config import ModelConfig, settings
 from core.gate import run_full_gate, sandbox_copy
 from core.language import detect_language
@@ -726,30 +726,32 @@ async def _run_debate_inner(
             language=language,
             model_config=model_config,
         )
-        reviewer_runner = InMemoryRunner(agent=reviewer_agent, app_name=settings.APP_NAME)
+        reviewer_runner = InMemoryRunner(
+            agent=reviewer_agent, app_name=settings.APP_NAME
+        )
         reviewer_session = str(uuid.uuid4())
         await reviewer_runner.session_service.create_session(
             app_name=settings.APP_NAME, user_id=user_id, session_id=reviewer_session
         )
 
         async def _rebuild_reviewer() -> tuple[InMemoryRunner, str, int]:
-            """Draw a fresh key and rebuild the Reviewer for this same
-            round, keeping this round's retrieved examples/repo context.
-            The Reviewer is rebuilt fresh every round anyway, so this is
-            genuinely lossless — nothing about this round's session has
-            accumulated yet at the point a rotation would happen."""
-            agent, idx = build_reviewer(
+            """Rebuild the reviewer and close its old MCP subprocess first."""
+            nonlocal reviewer_agent
+            await close_agent_toolsets(reviewer_agent)
+            reviewer_agent, idx = build_reviewer(
                 format_examples_for_prompt(examples),
                 format_repo_context_for_prompt(repo_ctx),
                 language=language,
                 model_config=model_config,
             )
-            r = InMemoryRunner(agent=agent, app_name=settings.APP_NAME)
-            sid = str(uuid.uuid4())
-            await r.session_service.create_session(
-                app_name=settings.APP_NAME, user_id=user_id, session_id=sid
+            runner = InMemoryRunner(
+                agent=reviewer_agent, app_name=settings.APP_NAME
             )
-            return r, sid, idx
+            session_id = str(uuid.uuid4())
+            await runner.session_service.create_session(
+                app_name=settings.APP_NAME, user_id=user_id, session_id=session_id
+            )
+            return runner, session_id, idx
 
         context_label = (
             f"Current contents of {target_file}"
@@ -768,15 +770,18 @@ async def _run_debate_inner(
             f"say 'No further issues found.' End with your VERDICT line."
         )
 
-        text, _, _, _ = await _ask(
-            reviewer_runner,
-            reviewer_session,
-            user_id,
-            review_prompt,
-            cost_tracker=cost_tracker,
-            key_index=reviewer_key_index,
-            rebuild_on_rate_limit=_rebuild_reviewer,
-        )
+        try:
+            text, _, _, _ = await _ask(
+                reviewer_runner,
+                reviewer_session,
+                user_id,
+                review_prompt,
+                cost_tracker=cost_tracker,
+                key_index=reviewer_key_index,
+                rebuild_on_rate_limit=_rebuild_reviewer,
+            )
+        finally:
+            await close_agent_toolsets(reviewer_agent)
 
         verdict = _parse_verdict(text)
         return text, verdict, examples, repo_ctx
@@ -931,17 +936,18 @@ async def _run_debate_inner(
     )
 
     async def _rebuild_patcher() -> tuple[InMemoryRunner, str, int]:
-        """Draw a fresh key from the pool and rebuild the Patcher agent,
-        runner, and session. Safe mid-debate because every prompt sent to
-        the Patcher already carries the full ticket + current code — no
-        state is lost by starting a fresh session bound to a new key."""
-        agent, idx = build_patcher(language=language, model_config=model_config)
-        r = InMemoryRunner(agent=agent, app_name=settings.APP_NAME)
-        sid = str(uuid.uuid4())
-        await r.session_service.create_session(
-            app_name=settings.APP_NAME, user_id=user_id, session_id=sid
+        """Rebuild the Patcher and close its old MCP subprocess first."""
+        nonlocal patcher_agent
+        await close_agent_toolsets(patcher_agent)
+        patcher_agent, idx = build_patcher(
+            language=language, model_config=model_config
         )
-        return r, sid, idx
+        runner = InMemoryRunner(agent=patcher_agent, app_name=settings.APP_NAME)
+        session_id = str(uuid.uuid4())
+        await runner.session_service.create_session(
+            app_name=settings.APP_NAME, user_id=user_id, session_id=session_id
+        )
+        return runner, session_id, idx
 
     last_reviewer_text = reviewer_text
     extraction_failed = False
@@ -975,16 +981,17 @@ async def _run_debate_inner(
             )
             patcher_key_index = next_key_index
         except RuntimeError as e:
-
             logger.error(
                 "debate_failed_patcher_fix",
                 debate_id=debate_id,
                 round_num=round_num,
                 error=str(e),
             )
+            await close_agent_toolsets(patcher_agent)
             break
 
         current_code, extraction_failed = _extract_code(patch_text, current_code)
+
         target_path.write_text(current_code)
 
         # -- Run validation on the patched code -------------------------
@@ -1025,6 +1032,7 @@ async def _run_debate_inner(
             )
             result.rounds.append(round_log)
             await _persist_with_timeout(_persist_round, debate_id, round_log)
+            await close_agent_toolsets(patcher_agent)
             break
 
         skipped_counterexample = _check_reviewer_wrote_test(
@@ -1075,11 +1083,15 @@ async def _run_debate_inner(
 
         last_reviewer_text = reviewer_text
 
+    await close_agent_toolsets(patcher_agent)
+
     # ===================================================================
+
     # PHASE 3: Final gate — sole merge authority
     # ===================================================================
 
     final_gate = run_full_gate(str(sandbox), target_file)
+
     result.final_gate = final_gate
     result.merged = final_gate["passed"] and not result.needs_human_review
     result.cost = cost_tracker.to_dict()
