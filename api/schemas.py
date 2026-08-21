@@ -232,6 +232,33 @@ class HealthResponse(BaseModel):
     details: Optional[dict[str, str]] = None
 
 
+class AdminDebateSummary(BaseModel):
+    """Non-sensitive cross-tenant summary for authorized operators."""
+
+    id: str
+    tenant_id: Optional[str] = None
+    repo_ref: str
+    target_file: str
+    status: str
+    merged: Optional[bool] = None
+    reviewer_verdict: Optional[str] = None
+    needs_human_review: Optional[bool] = None
+    pr_repo: Optional[str] = None
+    pr_number: Optional[int] = None
+    commit_sha: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class AdminDebateListResponse(BaseModel):
+    """Paginated admin debate listing."""
+
+    items: list[AdminDebateSummary] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
+
+
 class ErrorResponse(BaseModel):
     """Standard error response."""
 

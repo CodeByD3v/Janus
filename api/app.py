@@ -17,11 +17,14 @@ import subprocess
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
-from api.auth import key_store, require_api_key
+from api.auth import key_store, require_admin_api_key, require_api_key
 from api.schemas import (
+    AdminDebateListResponse,
+    AdminDebateSummary,
     CreateDebateRequest,
     CreateDebateResponse,
     DebateResponse,
@@ -64,6 +67,142 @@ if _cors_origins:
 from api.github_app import github_router
 
 app.include_router(github_router)
+
+
+_ADMIN_DASHBOARD_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Janus Admin Dashboard</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: 2rem; background: #101827; color: #e5e7eb; }
+    main { max-width: 1180px; margin: auto; }
+    h1 { margin-top: 0; }
+    form { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+    input, button { border: 1px solid #475569; border-radius: .4rem; padding: .65rem .8rem; font: inherit; }
+    input { background: #1e293b; color: inherit; }
+    button { background: #2563eb; color: white; cursor: pointer; }
+    button:hover { background: #1d4ed8; }
+    table { width: 100%; border-collapse: collapse; background: #172033; }
+    th, td { text-align: left; padding: .7rem; border-bottom: 1px solid #334155; vertical-align: top; }
+    th { color: #93c5fd; }
+    .status { margin: .75rem 0; min-height: 1.4rem; }
+    .error { color: #fca5a5; }
+    .muted { color: #94a3b8; }
+    @media (max-width: 800px) { body { padding: 1rem; } table { display: block; overflow-x: auto; white-space: nowrap; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Janus Admin Dashboard</h1>
+  <p class="muted">Cross-tenant debate summaries. The key is kept in memory and sent only as <code>X-API-Key</code>.</p>
+  <form id="filters">
+    <input id="key" type="password" autocomplete="off" placeholder="Admin API key" required>
+    <input id="tenant" maxlength="128" placeholder="Tenant filter (optional)">
+    <select id="status"><option value="">All statuses</option><option>queued</option><option>running</option><option>completed</option><option>error</option></select>
+    <button type="submit">Refresh</button>
+  </form>
+  <div id="statusMessage" class="status"></div>
+  <table>
+    <thead><tr><th>ID</th><th>Tenant</th><th>Status</th><th>Repository</th><th>PR</th><th>Verdict</th><th>Created</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="7" class="muted">Authenticate to load debates.</td></tr></tbody>
+  </table>
+</main>
+<script>
+const form = document.getElementById('filters');
+const message = document.getElementById('statusMessage');
+const rows = document.getElementById('rows');
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  message.className = 'status'; message.textContent = 'Loading…';
+  const params = new URLSearchParams({limit: '100'});
+  if (document.getElementById('tenant').value) params.set('tenant_id', document.getElementById('tenant').value);
+  if (document.getElementById('status').value) params.set('status', document.getElementById('status').value);
+  try {
+    const response = await fetch('/admin/debates?' + params, {
+      headers: {'X-API-Key': document.getElementById('key').value},
+      credentials: 'same-origin'
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Request failed');
+    rows.replaceChildren();
+    for (const item of data.items) {
+      const row = document.createElement('tr');
+      for (const value of [item.id, item.tenant_id || '—', item.status, item.repo_ref + ' :: ' + item.target_file,
+                           item.pr_repo ? item.pr_repo + ' #' + item.pr_number : '—', item.reviewer_verdict || '—', item.created_at || '—']) {
+        const cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
+      }
+      rows.appendChild(row);
+    }
+    if (!data.items.length) rows.innerHTML = '<tr><td colspan="7" class="muted">No debates found.</td></tr>';
+    message.textContent = `${data.total} debate(s)`;
+  } catch (error) {
+    message.className = 'status error'; message.textContent = error.message;
+  }
+});
+</script>
+</body>
+</html>"""
+
+
+@app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
+def admin_dashboard() -> HTMLResponse:
+    """Serve the operator UI; debate data still requires an admin key."""
+    return HTMLResponse(_ADMIN_DASHBOARD_HTML)
+
+
+@app.get(
+    "/admin/debates",
+    response_model=AdminDebateListResponse,
+    responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
+)
+def list_admin_debates(
+    operator_id: str = Depends(require_admin_api_key),
+    tenant_filter: str | None = Query(default=None, alias="tenant_id", max_length=128),
+    status: str | None = Query(default=None, max_length=32),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> AdminDebateListResponse:
+    """List non-sensitive debate summaries across tenants for operators."""
+    del operator_id  # authorization and rate limiting are handled by the dependency
+    with get_session() as db:
+        query = db.query(DebateSession)
+        if tenant_filter is not None:
+            query = query.filter(DebateSession.tenant_id == tenant_filter)
+        if status is not None:
+            query = query.filter(DebateSession.status == status)
+        total = query.count()
+        sessions = (
+            query.order_by(DebateSession.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return AdminDebateListResponse(
+            items=[
+                AdminDebateSummary(
+                    id=session.id,
+                    tenant_id=session.tenant_id,
+                    repo_ref=session.repo_ref,
+                    target_file=session.target_file,
+                    status=session.status,
+                    merged=session.merged,
+                    reviewer_verdict=session.reviewer_verdict,
+                    needs_human_review=session.needs_human_review,
+                    pr_repo=session.pr_repo,
+                    pr_number=session.pr_number,
+                    commit_sha=session.commit_sha,
+                    created_at=session.created_at.isoformat() if session.created_at else None,
+                    updated_at=session.updated_at.isoformat() if session.updated_at else None,
+                )
+                for session in sessions
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
 
 
 # ---------------------------------------------------------------------------

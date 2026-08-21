@@ -327,6 +327,7 @@ docker compose up --build
 | `GOOGLE_API_KEYS` | No | — | Comma-separated pool of Gemini keys (GAP 15) — takes precedence over the singular var if set |
 | `GOOGLE_API_KEY_COOLDOWN_SECONDS` | No | `30` | How long a rate-limited key is skipped before the pool retries it |
 | `API_KEYS` | API | — | `key1:tenant1,key2:tenant2` — **this service's own tenant auth keys, unrelated to the Google keys above** |
+| `ADMIN_API_KEYS` | No | — | `key1:operator1,key2:operator2` — admin-only keys for `/admin/debates`; empty disables admin access |
 | `DATABASE_URL` | Yes | `sqlite:///./adversarial_code_review.db` | DB connection string |
 | `ADV_REVIEW_MODEL` | No | `gemini-2.5-flash` | LLM model name |
 | `USE_CONTAINERIZED_GATE` | No | `false` | Enable Docker sandbox |

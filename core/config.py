@@ -212,6 +212,11 @@ class Settings:
     ALLOWED_REPO_ROOTS: str = field(
         default_factory=lambda: _optional("ALLOWED_REPO_ROOTS", "")
     )
+    # Comma-separated admin API entries in the form key:operator_id. Empty
+    # means no admin access is configured; admin endpoints fail closed.
+    ADMIN_API_KEYS: str = field(
+        default_factory=lambda: _optional("ADMIN_API_KEYS", "")
+    )
     # Comma-separated allowed CORS origins, or "*" for any origin. Empty
     # disables CORS entirely (no cross-origin browser access). "*" is safe
     # here specifically because auth is header-based (X-API-Key), not

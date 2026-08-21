@@ -64,11 +64,13 @@ life — see §9.3.
 adversarial_code_review/
 ├── api/
 │   ├── app.py              FastAPI app: POST /debates, GET /debates/{id},
-│   │                       GET /healthz, GET /metrics
+│   │                       GET /admin/debates, GET /healthz, GET /metrics,
+│   │                       and the /admin operator dashboard
 │   ├── schemas.py           Request/response models + validation
 │   │                       (repo_ref allowlist, target_file denylist,
 │   │                       pr_repo/pr_number/webhook_url cross-validation)
-│   ├── auth.py              API-key → tenant_id resolution, rate limiting
+│   ├── auth.py              Role-aware API-key resolution (tenant/admin),
+│   │                       hashed credentials, and rate limiting
 │   └── github_app.py        GitHub App webhook handler (Phase 6)
 │
 ├── core/

@@ -14,6 +14,7 @@ services:
       DATABASE_URL: "postgresql+psycopg2://janus:janus@db:5432/janus"
       GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
       API_KEYS: "${API_KEYS}"
+      ADMIN_API_KEYS: "${ADMIN_API_KEYS:-}"
       ALLOWED_REPO_ROOTS: "${ALLOWED_REPO_ROOTS:-/app/repos}"
       GITHUB_REPO_CACHE_DIR: "/app/repos/.github-cache"
       USE_CONTAINERIZED_GATE: "true"

@@ -18,8 +18,10 @@ Usage:
 from __future__ import annotations
 
 import hashlib
-import time
+import os
 import threading
+import time
+from dataclasses import dataclass
 from typing import Optional
 
 from fastapi import HTTPException, Request, Security
@@ -37,6 +39,12 @@ _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 # Key store — maps hashed API keys to tenant IDs
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class _KeyMetadata:
+    tenant_id: str
+    role: str
+
+
 class KeyStore:
     """In-memory store of hashed API keys -> tenant metadata.
 
@@ -46,18 +54,40 @@ class KeyStore:
     """
 
     def __init__(self) -> None:
-        self._keys: dict[str, str] = {}  # hash -> tenant_id
+        self._keys: dict[str, _KeyMetadata] = {}  # hash -> metadata
         self._lock = threading.Lock()
 
-    def register_key(self, raw_key: str, tenant_id: str) -> None:
-        """Register a raw API key, storing only its hash."""
+    def register_key(self, raw_key: str, tenant_id: str, role: str = "tenant") -> None:
+        """Register a raw API key, storing only its hash and role."""
+        if not raw_key or role not in {"tenant", "admin"}:
+            return
         key_hash = self._hash_key(raw_key)
         with self._lock:
-            self._keys[key_hash] = tenant_id
-        logger.info("api_key_registered", tenant_id=tenant_id)
+            existing = self._keys.get(key_hash)
+            if existing is not None and existing.role != role:
+                # A credential must never straddle privilege domains. Remove
+                # the collision rather than silently granting either role.
+                self._keys.pop(key_hash, None)
+                logger.error("api_key_role_conflict")
+                return
+            self._keys[key_hash] = _KeyMetadata(tenant_id=tenant_id, role=role)
+        logger.info("api_key_registered", tenant_id=tenant_id, role=role)
 
     def validate_key(self, raw_key: str) -> Optional[str]:
-        """Validate a raw API key. Returns the tenant_id if valid, None otherwise."""
+        """Validate a tenant key, excluding credentials with the admin role."""
+        metadata = self._metadata_for(raw_key)
+        if metadata is None or metadata.role != "tenant":
+            return None
+        return metadata.tenant_id
+
+    def validate_admin_key(self, raw_key: str) -> Optional[str]:
+        """Validate an admin key. Returns its operator id if authorized."""
+        metadata = self._metadata_for(raw_key)
+        if metadata is None or metadata.role != "admin":
+            return None
+        return metadata.tenant_id
+
+    def _metadata_for(self, raw_key: str) -> _KeyMetadata | None:
         key_hash = self._hash_key(raw_key)
         with self._lock:
             return self._keys.get(key_hash)
@@ -71,22 +101,32 @@ class KeyStore:
 
         Format: "key1:tenant1,key2:tenant2"
         """
-        import os
         raw = os.environ.get("API_KEYS", "")
         if not raw:
             logger.warning(
                 "no_api_keys_configured",
-                detail="API_KEYS env var is empty — all requests will be rejected. "
+                detail="API_KEYS env var is empty — tenant requests will be rejected. "
                 "Set API_KEYS=key1:tenant1,key2:tenant2 to enable access.",
             )
-            return
-        for pair in raw.split(","):
+        else:
+            for pair in raw.split(","):
+                pair = pair.strip()
+                if ":" not in pair:
+                    logger.warning("invalid_api_key_entry", entry="***")
+                    continue
+                key, tenant = pair.split(":", 1)
+                self.register_key(key.strip(), tenant.strip(), role="tenant")
+
+        admin_raw = settings.ADMIN_API_KEYS
+        for pair in admin_raw.split(","):
             pair = pair.strip()
-            if ":" not in pair:
-                logger.warning("invalid_api_key_entry", entry="***")
+            if not pair:
                 continue
-            key, tenant = pair.split(":", 1)
-            self.register_key(key.strip(), tenant.strip())
+            if ":" not in pair:
+                logger.warning("invalid_admin_api_key_entry", entry="***")
+                continue
+            key, operator = pair.split(":", 1)
+            self.register_key(key.strip(), operator.strip(), role="admin")
 
 
 # Global key store — loaded once at startup
@@ -183,3 +223,24 @@ async def require_api_key(
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
     return tenant_id
+
+
+async def require_admin_api_key(
+    request: Request,
+    api_key: Optional[str] = Security(_api_key_header),
+) -> str:
+    """Require a key explicitly registered with the admin role."""
+    if not api_key:
+        logger.warning("admin_auth_missing_key", path=request.url.path)
+        raise HTTPException(status_code=401, detail="Missing X-API-Key header")
+
+    operator_id = key_store.validate_admin_key(api_key)
+    if operator_id is None:
+        logger.warning("admin_auth_forbidden", path=request.url.path)
+        raise HTTPException(status_code=403, detail="Admin authorization required")
+
+    if not rate_limiter.check(f"admin:{operator_id}"):
+        logger.warning("admin_rate_limited", path=request.url.path)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    return operator_id

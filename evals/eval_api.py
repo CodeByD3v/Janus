@@ -34,9 +34,9 @@ os.environ.setdefault(
 from fastapi.testclient import TestClient  # noqa: E402
 
 from api.app import app  # noqa: E402
-from api.auth import key_store, rate_limiter  # noqa: E402
-from storage.db import run_migrations  # noqa: E402
-
+from api.auth import KeyStore, key_store, rate_limiter  # noqa: E402
+from storage.db import get_session, run_migrations  # noqa: E402
+from storage.models import DebateSession  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -44,6 +44,7 @@ from storage.db import run_migrations  # noqa: E402
 
 TEST_KEY = "test-api-key-12345"
 TEST_TENANT = "test-tenant"
+ADMIN_KEY = "test-admin-key-98765"
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -51,6 +52,7 @@ def _setup_db():
     """Run migrations once for the module."""
     run_migrations()
     key_store.register_key(TEST_KEY, TEST_TENANT)
+    key_store.register_key(ADMIN_KEY, "operator-test", role="admin")
 
 
 @pytest.fixture
@@ -64,6 +66,12 @@ def client():
 def auth_headers():
     """Headers with a valid API key."""
     return {"X-API-Key": TEST_KEY}
+
+
+@pytest.fixture
+def admin_headers():
+    """Headers with a valid admin API key."""
+    return {"X-API-Key": ADMIN_KEY}
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +100,13 @@ class TestAuth:
             headers={"X-API-Key": "wrong-key-000"},
         )
         assert resp.status_code == 401
+
+    def test_role_collision_is_rejected(self) -> None:
+        store = KeyStore()
+        store.register_key("same-secret", "tenant-a", role="tenant")
+        store.register_key("same-secret", "operator-a", role="admin")
+        assert store.validate_key("same-secret") is None
+        assert store.validate_admin_key("same-secret") is None
 
     def test_rate_limiting(self, client: TestClient) -> None:
         """Exhaust the rate limit and verify 429 is returned."""
@@ -122,6 +137,76 @@ class TestAuth:
         # Third should be rate limited
         resp3 = client.post("/debates", json=body, headers=headers)
         assert resp3.status_code == 429
+
+
+# ---------------------------------------------------------------------------
+# Admin visibility tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdminVisibility:
+    def test_dashboard_shell_is_available_without_data_access(self, client: TestClient) -> None:
+        response = client.get("/admin")
+        assert response.status_code == 200
+        assert "Janus Admin Dashboard" in response.text
+        assert "X-API-Key" in response.text
+
+    def test_admin_endpoint_requires_admin_key(
+        self, client: TestClient, auth_headers: dict
+    ) -> None:
+        assert client.get("/admin/debates").status_code == 401
+        assert client.get("/admin/debates", headers=auth_headers).status_code == 403
+
+    def test_admin_key_cannot_authenticate_tenant_route(
+        self, client: TestClient, admin_headers: dict
+    ) -> None:
+        response = client.get(
+            f"/debates/{uuid.uuid4()}", headers=admin_headers
+        )
+        assert response.status_code == 401
+
+    def test_admin_can_list_and_filter_tenants(
+        self, client: TestClient, admin_headers: dict
+    ) -> None:
+        first_id = str(uuid.uuid4())
+        second_id = str(uuid.uuid4())
+        with get_session() as db:
+            db.add_all([
+                DebateSession(
+                    id=first_id,
+                    repo_ref="repo-a",
+                    target_file="a.py",
+                    ticket="tenant A private ticket",
+                    status="queued",
+                    tenant_id="tenant-a",
+                    webhook_url="https://private.example/webhook",
+                    model_api_key_encrypted="encrypted-secret",
+                ),
+                DebateSession(
+                    id=second_id,
+                    repo_ref="repo-b",
+                    target_file="b.py",
+                    ticket="tenant B private ticket",
+                    status="error",
+                    tenant_id="tenant-b",
+                ),
+            ])
+
+        response = client.get("/admin/debates?limit=1", headers=admin_headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] >= 2
+        assert len(data["items"]) == 1
+        assert "ticket" not in data["items"][0]
+        assert "webhook_url" not in data["items"][0]
+        assert "model_api_key_encrypted" not in data["items"][0]
+
+        filtered = client.get(
+            "/admin/debates?tenant_id=tenant-a", headers=admin_headers
+        )
+        assert filtered.status_code == 200
+        assert filtered.json()["total"] == 1
+        assert filtered.json()["items"][0]["id"] == first_id
 
 
 # ---------------------------------------------------------------------------

@@ -414,11 +414,15 @@ Grouped as in `core/config.py`. `—` means no default (empty string), not
 |---|---|---|
 | `API_HOST` | `0.0.0.0` | |
 | `API_PORT` | `8000` | |
-| `API_KEYS` | — | `key1:tenant1,key2:tenant2` — required or every request is rejected |
-| `RATE_LIMIT_REQUESTS` | `60` | |
+| `API_KEYS` | — | `key1:tenant1,key2:tenant2` — tenant keys; missing means tenant requests are rejected |
+| `ADMIN_API_KEYS` | — | `key1:operator1,key2:operator2` — admin-only keys for `/admin/debates`; never reuse tenant keys |
+| `RATE_LIMIT_REQUESTS` | `60` | Applies per tenant/operator identity |
+
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | |
 | `ALLOWED_REPO_ROOTS` | — | **Fail-closed**: empty rejects every `repo_ref`. See the note at the top of this file. |
 | `CORS_ALLOWED_ORIGINS` | — | Empty disables CORS entirely; `*` is safe here since auth is header-based, not cookies |
+
+Open `/admin` for the operator dashboard. It displays only non-sensitive debate summaries and sends the entered admin key in the `X-API-Key` header. The underlying `GET /admin/debates` endpoint supports `tenant_id`, `status`, `limit`, and `offset` filters. Ordinary tenant keys receive `403`, and an unset `ADMIN_API_KEYS` value leaves the endpoint inaccessible.
 
 ### Worker
 | Variable | Default | Notes |

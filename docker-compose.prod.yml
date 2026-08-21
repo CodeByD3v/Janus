@@ -19,8 +19,9 @@
 #   docker compose -f docker-compose.prod.yml up -d --remove-orphans
 #
 # Requires a .env file already present on the deploy host with real secrets
-# (GOOGLE_API_KEY or GOOGLE_API_KEYS, API_KEYS, and anything else in
-# README.md's Environment Variables table). That file is managed on the
+# (GOOGLE_API_KEY or GOOGLE_API_KEYS, API_KEYS, ADMIN_API_KEYS when the
+# dashboard is enabled, and anything else in README.md's Environment
+# Variables table). That file is managed on the
 # host directly, out of band from CI — the deploy pipeline never writes
 # secrets to disk on the host.
 
@@ -35,6 +36,7 @@ services:
       GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
       GOOGLE_API_KEYS: "${GOOGLE_API_KEYS:-}"
       API_KEYS: "${API_KEYS}"
+      ADMIN_API_KEYS: "${ADMIN_API_KEYS:-}"
       ALLOWED_REPO_ROOTS: "${ALLOWED_REPO_ROOTS:-/app/repos}"
       GITHUB_REPO_CACHE_DIR: "/app/repos/.github-cache"
       USE_CONTAINERIZED_GATE: "true"

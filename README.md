@@ -166,6 +166,23 @@ curl http://localhost:8000/metrics
 # → Prometheus-format counters and histograms
 ```
 
+### Admin dashboard and cross-tenant listing
+
+Configure `ADMIN_API_KEYS` as comma-separated `key:operator_id` entries. Open
+`http://localhost:8000/admin` and enter an admin key to view non-sensitive
+summaries across tenants. The API endpoint supports optional `tenant_id`,
+`status`, `limit`, and `offset` query parameters:
+
+```bash
+curl "http://localhost:8000/admin/debates?status=running&limit=50" \
+  -H "X-API-Key: $ADMIN_KEY"
+```
+
+Tenant keys are rejected with `403`, and the endpoint is unavailable unless a
+key is explicitly registered with the admin role. The response excludes ticket
+text, webhook URLs, encrypted BYOK material, round transcripts, and gate
+command details.
+
 ---
 
 ## Architecture
@@ -191,7 +208,8 @@ curl http://localhost:8000/metrics
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `GOOGLE_API_KEY` | Worker | — | Gemini API key |
-| `API_KEYS` | API | — | `key:tenant,key:tenant` |
+| `API_KEYS` | API | — | `key:tenant,key:tenant` — tenant-scoped API keys |
+| `ADMIN_API_KEYS` | API | — | `key:operator,key:operator` — admin-only keys for `/admin/debates`; empty disables admin access |
 | `DATABASE_URL` | Yes | `sqlite:///./adversarial_code_review.db` | DB connection |
 | `ADV_REVIEW_MODEL` | No | `gemini-2.5-flash` | LLM model |
 | `USE_CONTAINERIZED_GATE` | No | `false` | Docker sandbox |
@@ -274,7 +292,9 @@ mkdir -p /opt/janus && cd /opt/janus
 cat > .env <<'EOF'
 GOOGLE_API_KEYS=key-one,key-two
 API_KEYS=your-api-key:your-tenant-id
+ADMIN_API_KEYS=your-admin-key:operations
 EOF
+
 ```
 Point `DEPLOY_PATH` at `/opt/janus` (or wherever you chose). After that,
 every push to `main` builds, pushes, migrates, and rolls out automatically

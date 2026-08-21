@@ -1237,21 +1237,18 @@ or when a fine-tuning-shaped problem (systematic Reviewer weaknesses that
 retrieval can't fix, only learned judgment can) is actually observed in
 practice, not hypothesized.
 
-### Admin dashboard / cross-tenant visibility
-There is currently no admin role and no way to see system-wide activity
-across tenants — `GET /debates/{id}` is deliberately tenant-isolated, by
-design, and there's no `GET /admin/debates` list endpoint at all.
+### Admin dashboard / cross-tenant visibility — implemented
+Janus now provides an admin-only `GET /admin/debates` endpoint with tenant,
+status, pagination, and limit filters, plus a same-origin `/admin` operator
+dashboard. Ordinary tenant keys remain strictly isolated and receive `403`
+for admin routes.
 
-This was scoped out explicitly, not forgotten: building it means an admin
-key tier in `api/auth.py`, list/filter endpoints that bypass tenant
-isolation for that role specifically, and — since raw JSON is a poor fit
-for "one operator scanning system-wide activity" — some minimal UI to
-actually look at the data, which is a meaningfully different kind of work
-from everything else in this project so far.
-
-**Revisit when**: there's an actual operator who needs this, not before —
-building visibility tooling for a user that doesn't exist yet is exactly
-the kind of premature breadth this project has otherwise avoided.
+Admin credentials are loaded from `ADMIN_API_KEYS` as hashed in-memory key
+metadata with an explicit `admin` role. Empty configuration disables admin
+access. A credential cannot be registered in both the tenant and admin role;
+role collisions are removed and fail closed. Responses contain only
+non-sensitive debate summaries and exclude tickets, webhook URLs, encrypted
+BYOK material, round transcripts, and gate command details.
 
 ### Gate baseline diffing — implemented
 `run_tests` still executes the full suite, unscoped, because narrowing runtime
