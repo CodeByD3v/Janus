@@ -15,10 +15,9 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # Model configuration for BYOK (Bring-Your-Own-Key) — Phase 5
@@ -228,6 +227,12 @@ class Settings:
     )
     WORKER_MAX_CONCURRENT: int = field(
         default_factory=lambda: _optional_int("WORKER_MAX_CONCURRENT", 4)
+    )
+    # Hard deadline for one async LLM/MCP agent call. This prevents a stalled
+    # MCP subprocess or provider stream from keeping a debate task alive
+    # forever; retry policy remains responsible for transient failures.
+    LLM_CALL_TIMEOUT_SECONDS: int = field(
+        default_factory=lambda: _optional_int("LLM_CALL_TIMEOUT_SECONDS", 180)
     )
     # A DebateSession stuck in status='running' with no activity (see
     # storage.db.sweep_zombie_sessions's docstring for exactly what

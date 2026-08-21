@@ -256,17 +256,25 @@ async def _ask(
     for attempt in range(1, max_retries + 1):
         try:
             start_time = time.monotonic()
-            final_text = ""
-            async for event in runner.run_async(
-                user_id=user_id, session_id=session_id, new_message=message
-            ):
-                if event.content and event.content.parts:
-                    for part in event.content.parts:
-                        part_text = getattr(part, "text", None)
-                        if isinstance(part_text, str) and part_text:
-                            final_text += part_text
 
+            async def _collect_response() -> str:
+                final_text = ""
+                async for event in runner.run_async(
+                    user_id=user_id, session_id=session_id, new_message=message
+                ):
+                    if event.content and event.content.parts:
+                        for part in event.content.parts:
+                            part_text = getattr(part, "text", None)
+                            if isinstance(part_text, str) and part_text:
+                                final_text += part_text
+                return final_text
+
+            final_text = await asyncio.wait_for(
+                _collect_response(),
+                timeout=settings.LLM_CALL_TIMEOUT_SECONDS,
+            )
             duration = time.monotonic() - start_time
+
             _circuit_breaker.record_success()
 
             if cost_tracker:

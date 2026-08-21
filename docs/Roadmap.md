@@ -25,7 +25,7 @@ quick navigation, not as stable anchors.
 | Deploy pipeline (build → push → migrate → roll out → health-check) | Built, verified |
 | Notifications (PR comment, webhook) | Built, verified |
 | Sandbox-escape fix (MCP-layer repo_dir validation) | Built, verified |
-| SSRF protection (webhooks) | Built, verified (DNS rebinding excluded — see §4) |
+| SSRF protection (webhooks) | Built, verified with validated-IP pinning |
 | Zombie-session sweeper | Built, verified |
 | `_persist_session_start` upsert fix | Built, verified |
 | **Phase 1: Core Engine Restructure** | Implemented and regression-tested |
@@ -33,7 +33,7 @@ quick navigation, not as stable anchors.
 | **Phase 3: Language-Agnostic Prompts** | Implemented and regression-tested |
 | **Phase 4: Repository Context Generalization** | Implemented; non-Python fallback regression-tested |
 | **Phase 5: Multi-Provider LLM / BYOK** | Implemented; provider credential validation hardened |
-| **Phase 6: GitHub App & Product Layer** | Implemented webhook flow; installation-scoped auth remains deployment hardening |
+| **Phase 6: GitHub App & Product Layer** | Implemented; installation-scoped GitHub App auth verified |
 | **Phase 7: Auto-Merge** | Implemented; allowlists now fail closed when metadata is absent |
 
 ---
@@ -1067,15 +1067,29 @@ GitHub App permissions.
 
 ## 3. Remaining deployment hardening
 
-The application-level Janus 2.0 phases are implemented. The GitHub integration
-currently uses the configured GitHub token for API operations; production
-installations that need per-tenant GitHub App isolation should add an
-installation-token provider and store installation credentials through a
-separate secrets manager. The deterministic gate, fork protection, trigger
-configuration, and auto-merge authorization do not depend on that future
-credential-provider seam.
+The application-level Janus 2.0 phases are implemented. GitHub App
+installation-scoped authentication is now implemented in
+`core/github_credentials.py`: short-lived tokens are minted per installation,
+cached by `(tenant_id, installation_id)`, and used by repository materialization,
+notifications, and auto-merge. The App private key remains outside the
+application database behind the `SecretStore` boundary. A static
+`GITHUB_TOKEN` remains only as a legacy fallback for unscoped single-tenant
+operation.
 
-## 4. Unresolved from v1.0 — _persist_session_end
+The deterministic gate, fork protection, trigger configuration, and auto-merge
+authorization remain independent of the credential-provider seam.
+
+## 4. Async lifecycle hardening — mitigation implemented
+
+The original `_persist_session_end` observation remains documented below as a
+historical diagnostic finding. The runtime now removes the known event-loop
+blocking paths: persistence, worker queue claims, zombie sweeps, worker session
+reads, and worker error updates run in threads; each LLM/MCP stream has a
+configured deadline; and MCP teardown is bounded without cancelling potentially
+stuck anyio subprocess cleanup in the active event loop. Regression tests cover
+heartbeat continuity and bounded sync/async cleanup. A persistent environment
+with py-spy remains useful for confirming the underlying third-party MCP stack
+root cause, but the worker no longer waits indefinitely on these paths.
 
 **`_persist_session_end` was observed to not complete within the full
 worker process, in a live end-to-end test, after a real (failing) LLM call
@@ -1181,18 +1195,15 @@ rather than claimed fixed.
 
 ## 4. Deferred items carried forward
 
-### DNS rebinding on webhooks
-`post_webhook`'s SSRF protection resolves the destination hostname and
-rejects private/internal addresses before making the request. This closes
-the direct attack (supplying an internal address as the webhook URL
-outright) but not DNS rebinding — a hostname resolves to a safe address at
-check time, then a malicious or compromised DNS server returns a different,
-internal address at the moment the actual request is made.
-
-Closing this fully requires pinning the specific IP validated by the safety
-check and connecting to *that* address directly (a custom `requests`
-transport adapter), rather than letting the HTTP client re-resolve DNS
-independently. Real, self-contained work — not started.
+### DNS rebinding on webhooks — resolved
+`post_webhook` resolves and validates every address returned for the destination
+hostname, then passes the selected public IP to a custom Requests/urllib3
+transport adapter. The adapter connects to that IP directly while preserving
+the original hostname for HTTP Host and HTTPS SNI/certificate validation.
+Redirects and environment proxies are disabled, so the request cannot escape
+the validated destination through either mechanism. Regression coverage proves
+that the transport receives the validated IP and does not perform a second
+hostname resolution.
 
 ### Fine-tuning the Reviewer
 The target architecture, once ready, is three layers:

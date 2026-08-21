@@ -44,6 +44,9 @@ from mcp import StdioServerParameters
 
 from core.config import ModelConfig, settings
 from core.llm_client import build_model, build_model_for_config
+from core.observability import get_logger
+
+logger = get_logger(__name__)
 
 
 def _build_toolset(tool_filter: list[str]) -> MCPToolset:
@@ -88,15 +91,34 @@ def _build_reviewer_toolset() -> MCPToolset:
 
 
 async def close_agent_toolsets(agent: LlmAgent, timeout: float = 2.0) -> None:
-    """Close all async toolsets owned by an agent without blocking shutdown."""
+    """Close toolsets without blocking or cancelling a stuck MCP teardown.
+
+    Some MCPToolset versions expose an async close, while others perform
+    synchronous subprocess teardown before returning. Sync closes run in a
+    worker thread. Async closes run as shielded tasks: a timeout stops Janus
+    from waiting, but does not inject cancellation into anyio's subprocess
+    cleanup machinery, which was the suspected source of the event-loop
+    freeze. Timed-out cleanup is allowed to finish in the background.
+    """
     for tool in getattr(agent, "tools", []):
         close = getattr(tool, "close", None)
         if close is None:
             continue
-        try:
-            result: Any = close()
+
+        async def _close() -> None:
+            result: Any
+            if inspect.iscoroutinefunction(close):
+                result = close()
+            else:
+                result = await asyncio.to_thread(close)
             if inspect.isawaitable(result):
-                await asyncio.wait_for(result, timeout=timeout)
+                await result
+
+        task = asyncio.create_task(_close())
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("agent_toolset_close_timed_out", timeout_seconds=timeout)
         except Exception:
             # Cleanup must never mask the debate result.
             continue

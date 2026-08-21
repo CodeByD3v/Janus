@@ -332,6 +332,7 @@ docker compose up --build
 | `GITHUB_APP_JWT_TTL_SECONDS` | No | `540` | Short-lived App JWT lifetime, capped by GitHub’s limit |
 | `GITHUB_TOKEN_CACHE_SKEW_SECONDS` | No | `60` | Refresh installation tokens before expiry |
 | `GITHUB_TOKEN` | Legacy only | — | Static PAT fallback for unscoped, single-tenant deployments |
+| `LLM_CALL_TIMEOUT_SECONDS` | No | `180` | Maximum duration of one async LLM/MCP agent call |
 
 ### janus.yaml Configuration
 Per-repo configuration via `janus.yaml` allows developers to set custom validation checks, trigger modes, BYOK models (for enterprise users), and more.

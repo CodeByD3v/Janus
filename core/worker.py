@@ -25,6 +25,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from core.config import ModelConfig, settings
 from core.observability import get_logger
@@ -32,6 +33,47 @@ from storage.db import claim_queued_session, get_session, run_migrations, sweep_
 from storage.models import DebateSession
 
 logger = get_logger(__name__)
+
+
+def _load_session_details(session_id: str) -> dict[str, Any] | None:
+    """Read immutable debate inputs in a worker thread."""
+    with get_session() as db:
+        session = db.query(DebateSession).filter_by(id=session_id).first()
+        if session is None:
+            return None
+        return {
+            "repo_ref": session.repo_ref,
+            "target_file": session.target_file,
+            "ticket": session.ticket,
+            "tenant_id": session.tenant_id,
+            "pr_repo": session.pr_repo,
+            "pr_number": session.pr_number,
+            "pr_branch": session.pr_branch,
+            "pr_author": session.pr_author,
+            "commit_sha": session.commit_sha,
+            "github_installation_id": session.github_installation_id,
+            "webhook_url": session.webhook_url,
+            "model_provider": session.model_provider,
+            "model_name": session.model_name,
+            "model_api_key_encrypted": session.model_api_key_encrypted,
+        }
+
+
+def _mark_session_error(session_id: str, error_message: str) -> None:
+    """Persist an execution error without running DB work on the event loop."""
+    with get_session() as db:
+        session = db.query(DebateSession).filter_by(id=session_id).first()
+        if session:
+            session.status = "error"  # type: ignore[assignment]
+            session.error_message = error_message  # type: ignore[assignment]
+            session.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+
+
+def _load_commit_sha(session_id: str) -> str | None:
+    """Load the reviewed commit SHA in a worker thread."""
+    with get_session() as db:
+        session = db.query(DebateSession).filter_by(id=session_id).first()
+        return session.commit_sha if session else None
 
 
 class Worker:
@@ -79,7 +121,7 @@ class Worker:
             except Exception:
                 logger.error("worker_poll_error", exc_info=True)
 
-            self._maybe_sweep_zombies()
+            await self._maybe_sweep_zombies()
 
             # Clean up completed tasks
             done = {t for t in self._active_tasks if t.done()}
@@ -103,7 +145,7 @@ class Worker:
 
         logger.info("worker_stopped", worker_id=self.worker_id)
 
-    def _maybe_sweep_zombies(self) -> None:
+    async def _maybe_sweep_zombies(self) -> None:
         """Run the zombie-session sweep if ZOMBIE_SWEEP_INTERVAL_SECONDS
         has elapsed since the last sweep (or this is the first cycle —
         _last_sweep_at starts as None, so a worker that just restarted
@@ -126,7 +168,10 @@ class Worker:
             return
 
         try:
-            sweep_zombie_sessions(settings.ZOMBIE_SESSION_TIMEOUT_MINUTES)
+            await asyncio.to_thread(
+                sweep_zombie_sessions,
+                settings.ZOMBIE_SESSION_TIMEOUT_MINUTES,
+            )
         except Exception:
             logger.error("zombie_sweep_error", exc_info=True)
         finally:
@@ -137,7 +182,7 @@ class Worker:
         if not self._semaphore._value:  # type: ignore[attr-defined]
             return  # At max concurrency, skip this cycle
 
-        session_id = claim_queued_session(self.worker_id)
+        session_id = await asyncio.to_thread(claim_queued_session, self.worker_id)
         if session_id is None:
             return  # No queued sessions
 
@@ -153,26 +198,26 @@ class Worker:
     async def _run_debate(self, session_id: str) -> None:
         """Run a single debate, guarded by the concurrency semaphore."""
         async with self._semaphore:
-            # Load session details from DB
-            with get_session() as db:
-                session = db.query(DebateSession).filter_by(id=session_id).first()
-                if session is None:
-                    logger.error("debate_session_not_found", debate_id=session_id)
-                    return
+            # Load immutable session details off the event loop.
+            session_data = await asyncio.to_thread(_load_session_details, session_id)
+            if session_data is None:
+                logger.error("debate_session_not_found", debate_id=session_id)
+                return
 
-                repo_ref = session.repo_ref
-                target_file = session.target_file
-                ticket = session.ticket
-                tenant_id = session.tenant_id
-                pr_repo = session.pr_repo
-                pr_number = session.pr_number
-                pr_branch = session.pr_branch
-                pr_author = session.pr_author
-                github_installation_id = session.github_installation_id
-                webhook_url = session.webhook_url
-                model_provider = session.model_provider
-                model_name = session.model_name
-                model_api_key_encrypted = session.model_api_key_encrypted
+            repo_ref = session_data["repo_ref"]
+            target_file = session_data["target_file"]
+            ticket = session_data["ticket"]
+            tenant_id = session_data["tenant_id"]
+            pr_repo = session_data["pr_repo"]
+            pr_number = session_data["pr_number"]
+            pr_branch = session_data["pr_branch"]
+            pr_author = session_data["pr_author"]
+            commit_sha = session_data["commit_sha"]
+            github_installation_id = session_data["github_installation_id"]
+            webhook_url = session_data["webhook_url"]
+            model_provider = session_data["model_provider"]
+            model_name = session_data["model_name"]
+            model_api_key_encrypted = session_data["model_api_key_encrypted"]
 
             logger.info(
                 "debate_running",
@@ -187,12 +232,12 @@ class Worker:
                 # GitHub webhook rows carry a slug, not a local filesystem path.
                 # Materialize the exact reviewed commit before sandbox_copy().
                 if pr_repo and pr_number and not Path(repo_ref).is_dir():
-                    if not session.commit_sha:
+                    if not commit_sha:
                         raise RuntimeError("GitHub review is missing a commit SHA")
                     from core.github_materializer import materialize_github_repo
                     materialized_repo = materialize_github_repo(
                         pr_repo,
-                        session.commit_sha,
+                        commit_sha,
                         installation_id=github_installation_id,
                         tenant_id=tenant_id,
                     )
@@ -271,10 +316,8 @@ class Worker:
                             pr_branch=pr_branch,
                             pr_author=pr_author,
                         ):
-                            # Load commit_sha from session for SHA pinning
-                            with get_session() as db:
-                                s = db.query(DebateSession).filter_by(id=session_id).first()
-                                sha = s.commit_sha if s else None
+                            # Load commit_sha from session for SHA pinning off-loop.
+                            sha = await asyncio.to_thread(_load_commit_sha, session_id)
                             execute_auto_merge(
                                 pr_repo=pr_repo,
                                 pr_number=pr_number,
@@ -296,13 +339,8 @@ class Worker:
                     error=str(e),
                     exc_info=True,
                 )
-                # Mark session as errored
-                with get_session() as db:
-                    session = db.query(DebateSession).filter_by(id=session_id).first()
-                    if session:
-                        session.status = "error"  # type: ignore[assignment]
-                        session.error_message = str(e)  # type: ignore[assignment]
-                        session.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+                # Mark session as errored without blocking the event loop.
+                await asyncio.to_thread(_mark_session_error, session_id, str(e))
             finally:
                 if materialized_repo is not None:
                     from core.github_materializer import cleanup_materialized_repo
