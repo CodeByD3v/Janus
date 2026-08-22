@@ -40,7 +40,7 @@ The post-migration hardening work is also complete and regression-tested:
 
 ## Verification record
 
-The complete evaluation command runs every `evals/eval_*.py` module. The latest full run completed with **224 passed, 4 skipped, and 4 warnings**. Skips are integration cases requiring real external credentials. The Mermaid workflow in `JANUS_WORKFLOW.mmd` provides the corresponding end-to-end control-flow view.
+The complete evaluation command runs every `evals/eval_*.py` module. The latest full run completed with **224 passed, 4 skipped, and 4 warnings**. Skips are integration cases requiring real external credentials. GitHub App coverage in `evals/eval_github_app.py` is unit/regression-level with mocked `_github_get` calls; a live installed-App webhook flow against a real repository and public endpoint has not yet been run. The Mermaid workflow in `JANUS_WORKFLOW.mmd` provides the corresponding end-to-end control-flow view, while live external-infrastructure validation remains an operational follow-up.
 
 ## Deliberate future work
 

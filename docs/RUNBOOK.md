@@ -294,6 +294,13 @@ the step's `if:` condition (a step's own `env:` block is *not* visible to
 that same step's `if:` — this was a real, since-fixed bug in an earlier
 version of this pipeline).
 
+The GitHub App regression module is intentionally logic-level coverage:
+`eval_github_app.py` mocks `_github_get` while testing signature verification,
+trigger parsing, installation metadata validation, and file filtering. CI does
+not claim to validate a real installed App delivering to a public endpoint and
+reviewing a real repository; that requires external GitHub infrastructure and
+remains an operational follow-up.
+
 ### 6.2 Production deploy (`.github/workflows/deploy.yml`)
 
 On push to `main`: builds and pushes both images (service + sandbox),

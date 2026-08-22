@@ -35,7 +35,7 @@ navigation, not as stable anchors.
 | **Phase 3: Language-Agnostic Prompts** | Implemented and regression-tested |
 | **Phase 4: Repository Context Generalization** | Implemented; non-Python fallback regression-tested |
 | **Phase 5: Multi-Provider LLM / BYOK** | Implemented; provider credential validation hardened |
-| **Phase 6: GitHub App & Product Layer** | Implemented; installation-scoped GitHub App auth verified |
+| **Phase 6: GitHub App & Product Layer** | Implemented; unit/regression-tested with mocked GitHub calls; live installed-App E2E validation pending |
 | **Phase 7: Auto-Merge** | Implemented; allowlists now fail closed when metadata is absent |
 
 ---
@@ -1205,6 +1205,19 @@ Redirects and environment proxies are disabled, so the request cannot escape
 the validated destination through either mechanism. Regression coverage proves
 that the transport receives the validated IP and does not perform a second
 hostname resolution.
+
+### Live GitHub App end-to-end validation — pending infrastructure
+The GitHub App implementation and its unit/regression tests are complete, but
+`evals/eval_github_app.py` uses mocked `_github_get` calls. It verifies HMAC
+signature handling, `/janus review` trigger parsing, installation metadata
+validation, and file filtering without contacting GitHub.
+
+A live end-to-end run still requires a real GitHub App registration and private
+key, an installation on a test repository, a publicly reachable webhook
+endpoint, valid webhook delivery, and observation of the resulting worker
+review against the real repository. This cannot be completed in the sandboxed
+dev environment without real external infrastructure. Treat it as an
+operational validation gap, not as an unimplemented application phase.
 
 ### Fine-tuning the Reviewer
 The target architecture, once ready, is three layers:

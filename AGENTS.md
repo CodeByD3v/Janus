@@ -29,8 +29,8 @@ storage, a queue-based worker, and observable infrastructure.
 - Production infrastructure: persistence, authenticated API, observability,
   concurrency, CI/CD
 - Async lifecycle hardening: blocking persistence, gate, sandbox, and worker
-  DB operations are offloaded; LLM deadlines and bounded MCP teardown prevent
-  indefinite event-loop waits
+  DB operations are offloaded; LLM deadlines and bounded MCP teardown mitigate
+  the observed event-loop stall, whose third-party root cause remains unconfirmed
 - Fail-closed admin visibility tier with cross-tenant `GET /admin/debates`
   summaries and `/admin` operator dashboard; tenant/admin roles are disjoint
 - GitHub App webhook handler (`/janus review` comment trigger, PR
@@ -46,6 +46,10 @@ storage, a queue-based worker, and observable infrastructure.
   `asyncio.to_thread`, bounded persistence timeouts, LLM deadlines, and bounded
   shielded MCP teardown. The persistent-terminal/`py-spy` diagnostic remains
   optional follow-up work.
+- Live GitHub App end-to-end validation remains pending: it requires a real
+  App registration, installation, public webhook endpoint, and test
+  repository. `evals/eval_github_app.py` currently verifies signatures,
+  trigger parsing, and file filtering with mocked GitHub calls only.
 - Fine-tuning the Reviewer on a large mined dataset of PR comments that
   historically preceded a real bug-fix commit remains deliberate product work.
 

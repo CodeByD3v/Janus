@@ -68,13 +68,23 @@ now implemented and regression-tested:
 3. **Async persistence and MCP lifecycle risk** — synchronous persistence,
    gate, sandbox, and database work is moved off the event loop; persistence
    has bounded timeouts, and MCP teardown uses shielded bounded cleanup. The
-   regression suite covers event-loop continuity and teardown behavior. A
-   persistent environment may still be used for optional diagnosis of a
-   third-party MCP root cause, but no known indefinite wait remains in the
-   implemented Janus paths.
+   regression suite covers event-loop continuity and teardown behavior. These
+   controls mitigate the observed stall, but the underlying third-party
+   MCP/event-loop root cause remains unconfirmed; a persistent environment is
+   still required for optional `py-spy` diagnosis.
 
 The historical flaw descriptions above remain useful as audit context; they
 must not be read as the current security status of the repository.
+
+## Verification boundary
+
+The GitHub App implementation is covered by unit/regression tests in
+`evals/eval_github_app.py`: signature verification, trigger parsing,
+installation metadata validation, and file filtering are exercised with mocked
+`_github_get` calls. A live end-to-end delivery through a real registered and
+installed GitHub App, public webhook endpoint, and real repository has not yet
+been performed. Closing that gap requires real external infrastructure and is
+tracked as operational validation rather than an unimplemented code path.
 
 ---
 

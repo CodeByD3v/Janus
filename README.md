@@ -378,6 +378,10 @@ nothing here claims fine-tuned weights exist. See
 
 ## Known Limitations
 
+- GitHub App coverage is currently unit/regression-level: `evals/eval_github_app.py`
+  tests signature verification, trigger parsing, and file filtering with
+  mocked `_github_get` calls. A live end-to-end test against an installed App,
+  public webhook endpoint, and real repository has not yet been run.
 - The root cause of an observed async event-loop stall after a failing LLM/MCP
   sequence is not confirmed. Persistence and blocking worker operations are
   mitigated with `asyncio.to_thread` and bounded timeouts; LLM streams have

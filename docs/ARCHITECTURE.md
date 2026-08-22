@@ -504,6 +504,7 @@ combination on newer pytest versions):
 | `eval_api.py` | Auth, role-aware admin access, rate limiting, request validation, admin visibility, and enqueue/status paths |
 | `eval_storage_db.py` | Zombie-session sweeper |
 | `eval_async_lifecycle.py` | MCP/toolset teardown bounds, thread offloading, and LLM stream deadlines |
+| `eval_github_app.py` | HMAC signatures, trigger parsing, and file filtering with mocked GitHub calls; no live App/repository webhook flow |
 | `eval_github_credentials.py` | Installation-scoped token minting, tenant-aware caching, and legacy fallback |
 | `eval_reviewer.py` | Integration test — full debate against a real Gemini API key, marked `pytest.mark.integration` |
 
