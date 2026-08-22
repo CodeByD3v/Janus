@@ -378,7 +378,14 @@ nothing here claims fine-tuned weights exist. See
 
 ## Known Limitations
 
+- The root cause of an observed async event-loop stall after a failing LLM/MCP
+  sequence is not confirmed. Persistence and blocking worker operations are
+  mitigated with `asyncio.to_thread` and bounded timeouts; LLM streams have
+  deadlines; and MCP teardown is bounded with shielded cleanup. A persistent
+  terminal plus `py-spy` is still needed to finish third-party MCP diagnosis;
+  see `docs/Roadmap.md` §3–§4.
 - Seed retrieval store has 25 examples — quality improves as it grows
+
 - `MAX_ROUNDS = 5` is not calibrated against measured false-positive rates
 - Demo scope is a single Python file; no corpus-level evaluation yet
 - The Reviewer sometimes gives prose critiques without executable tests

@@ -1084,14 +1084,16 @@ authorization remain independent of the credential-provider seam.
 ## 4. Async lifecycle hardening — mitigation implemented
 
 The original `_persist_session_end` observation remains documented below as a
-historical diagnostic finding. The runtime now removes the known event-loop
-blocking paths: persistence, worker queue claims, zombie sweeps, worker session
-reads, and worker error updates run in threads; each LLM/MCP stream has a
-configured deadline; and MCP teardown is bounded without cancelling potentially
-stuck anyio subprocess cleanup in the active event loop. Regression tests cover
-heartbeat continuity and bounded sync/async cleanup. A persistent environment
-with py-spy remains useful for confirming the underlying third-party MCP stack
-root cause, but the worker no longer waits indefinitely on these paths.
+historical diagnostic finding whose root cause is not confirmed. The runtime
+mitigates the known event-loop blocking paths: persistence, worker queue claims,
+zombie sweeps, worker session reads, and worker error updates run in threads;
+each LLM/MCP stream has a configured deadline; and MCP teardown is bounded
+without cancelling potentially stuck anyio subprocess cleanup in the active
+event loop. Regression tests cover heartbeat continuity and bounded sync/async
+cleanup. These controls make individual operations fail loudly or time out, but
+they do not prove that a third-party MCP failure can never stall the event loop.
+A persistent environment with py-spy remains useful for completing that
+root-cause diagnosis.
 
 **`_persist_session_end` was observed to not complete within the full
 worker process, in a live end-to-end test, after a real (failing) LLM call
@@ -1189,8 +1191,8 @@ for usage.
 through `_persist_with_timeout` instead of raw blocking calls. Worker database
 operations, gate execution, sandbox operations, and MCP teardown are likewise
 bounded or thread-offloaded, and regression tests cover event-loop continuity.
-The original observation is retained above for historical traceability, not as
-an unresolved Janus production path.
+The mitigation is implemented; the original observation and its underlying
+third-party MCP/event-loop root cause remain unresolved for diagnosis.
 
 ## 4. Deferred items carried forward
 

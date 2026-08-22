@@ -525,17 +525,23 @@ validates the seams between them.
 
 The Janus 2.0 implementation, security hardening, GitHub App credential
 isolation, DNS-rebinding protection, gate baseline diffing, async lifecycle
-hardening, and admin dashboard are implemented and regression-tested. The
-remaining roadmap item is deliberate product work rather than an incomplete
-Janus 2.0 phase:
+mitigation, and admin dashboard are implemented and regression-tested. Two
+items must remain distinct:
 
-- **Fine-tuning the Reviewer** remains deferred until the behavioral retrieval
-  corpus and repository-context signals are mature enough to justify a
-  learned-reviewer training effort.
-- **Live third-party MCP root-cause diagnosis** remains useful as optional
-  research. Persistence calls are thread-offloaded and bounded by timeouts,
-  MCP teardown is shielded and bounded, and regression tests cover event-loop
-  continuity; no known indefinite wait remains in the implemented paths.
+- **Async event-loop stall root cause — unresolved**: after a real failing LLM
+  call sequence involving MCP, `_persist_session_end` was observed not to
+  complete and even `asyncio.wait_for` did not fire. This points to a possible
+  event-loop-wide stall, but the underlying third-party MCP cause is not
+  confirmed. The operational mitigation is active: persistence and blocking
+  worker work use `asyncio.to_thread`, persistence has bounded timeouts, LLM
+  streams have deadlines, and MCP teardown is shielded and bounded.
+- **Fine-tuning the Reviewer** remains deferred product work until the
+  behavioral retrieval corpus and repository-context signals are mature enough
+  to justify a learned-reviewer training effort.
+
+The reproduction script and `py-spy` workflow in `Roadmap.md` remain available
+for diagnosis in a persistent terminal; the unresolved investigation must not
+be represented as a fully confirmed fix.
 
 ---
 

@@ -40,9 +40,14 @@ storage, a queue-based worker, and observable infrastructure.
   author lists, gated by `janus.yaml` opt-in and INCONCLUSIVE verdict
   blocking — see `core/auto_merge.py`
 
-**What is future work:**
+**What remains open or future work:**
+- The root cause of the observed async event-loop stall after a failing LLM/MCP
+  sequence is not confirmed. Runtime mitigation is implemented through
+  `asyncio.to_thread`, bounded persistence timeouts, LLM deadlines, and bounded
+  shielded MCP teardown. The persistent-terminal/`py-spy` diagnostic remains
+  optional follow-up work.
 - Fine-tuning the Reviewer on a large mined dataset of PR comments that
-  historically preceded a real bug-fix commit
+  historically preceded a real bug-fix commit remains deliberate product work.
 
 ---
 
