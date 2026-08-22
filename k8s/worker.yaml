@@ -1,0 +1,177 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: janus-worker
+  labels:
+    app.kubernetes.io/name: janus-worker
+    app.kubernetes.io/part-of: janus-adversarial-review
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: janus-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: janus-worker
+        app.kubernetes.io/part-of: janus-adversarial-review
+    spec:
+      serviceAccountName: janus-worker
+      automountServiceAccountToken: false
+      # This pod needs a node that exposes Docker and permits the socket mount.
+      # Isolate such nodes with taints/labels and schedule this worker only
+      # there; the Docker socket is equivalent to broad host control.
+      nodeSelector:
+        janus.io/docker-sandbox: "true"
+      tolerations:
+        - key: janus.io/docker-sandbox
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        # Set this to the numeric group owning /var/run/docker.sock on the
+        # dedicated node pool. Leave empty only when the socket ACL permits
+        # uid/gid 1000; never assume Docker's host GID is universal.
+        supplementalGroups: []
+      containers:
+        - name: worker
+          image: janus-service
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "core.worker"]
+          envFrom:
+            - configMapRef:
+                name: janus-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: DATABASE_URL
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: GOOGLE_API_KEY
+                  optional: true
+            - name: GOOGLE_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: GOOGLE_API_KEYS
+                  optional: true
+            - name: API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: API_KEYS
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: OPENAI_API_KEY
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: GROQ_API_KEY
+                  optional: true
+            - name: NVIDIA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: NVIDIA_API_KEY
+                  optional: true
+            - name: COHERE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: COHERE_API_KEY
+                  optional: true
+            - name: BYOK_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: BYOK_ENCRYPTION_KEY
+                  optional: true
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: GITHUB_WEBHOOK_SECRET
+                  optional: true
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: GITHUB_APP_ID
+                  optional: true
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: GITHUB_APP_PRIVATE_KEY
+                  optional: true
+          volumeMounts:
+            - name: chroma-store
+              mountPath: /app/chroma_store
+            - name: repo-cache
+              mountPath: /app/repos
+            - name: docker-socket
+              mountPath: /var/run/docker.sock
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "python -c 'from storage.db import get_engine; get_engine().connect().close()'"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 4
+              memory: 4Gi
+      volumes:
+        - name: chroma-store
+          persistentVolumeClaim:
+            claimName: janus-chroma
+        - name: repo-cache
+          persistentVolumeClaim:
+            claimName: janus-repo-cache
+        - name: docker-socket
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: janus-worker
+  labels:
+    app.kubernetes.io/name: janus-worker

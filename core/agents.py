@@ -105,19 +105,19 @@ async def close_agent_toolsets(agent: LlmAgent, timeout: float = 2.0) -> None:
         if close is None:
             continue
 
-        async def _close() -> None:
+        async def _close(close_fn: Any = close) -> None:
             result: Any
-            if inspect.iscoroutinefunction(close):
-                result = close()
+            if inspect.iscoroutinefunction(close_fn):
+                result = close_fn()
             else:
-                result = await asyncio.to_thread(close)
+                result = await asyncio.to_thread(close_fn)
             if inspect.isawaitable(result):
                 await result
 
         task = asyncio.create_task(_close())
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("agent_toolset_close_timed_out", timeout_seconds=timeout)
         except Exception:
             # Cleanup must never mask the debate result.

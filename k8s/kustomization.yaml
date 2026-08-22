@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: janus
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - storage.yaml
+  # Create janus-runtime-secrets out of band; secret.example.yaml is a template only.
+  - postgres.yaml
+  - api.yaml
+  - worker.yaml
+  # Migration is deliberately applied by k8s/deploy.sh before this bundle.
+
+# Replace these immutable release tags during deployment. Do not deploy
+# mutable :latest tags in production.
+images:
+  - name: janus-service
+    newName: ghcr.io/codebyd3v/janus/service
+    newTag: replace-with-git-sha
+  - name: janus-sandbox
+    newName: ghcr.io/codebyd3v/janus/sandbox
+    newTag: replace-with-git-sha

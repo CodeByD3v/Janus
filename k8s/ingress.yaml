@@ -1,0 +1,29 @@
+# Optional: requires an Ingress controller and a TLS Secret named janus-tls.
+# Set the host and certificate through your cluster's certificate manager.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: janus-api
+  labels:
+    app.kubernetes.io/name: janus-api
+    app.kubernetes.io/part-of: janus-adversarial-review
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - janus.example.com
+      secretName: janus-tls
+  rules:
+    - host: janus.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: janus-api
+                port:
+                  name: http

@@ -107,6 +107,11 @@ adversarial_code_review/
 │   ├── schema.py             Validated record shape for behavioral examples
 │   └── ingest.py              Batch ingestion into the ChromaDB store
 │
+├── training/
+│   └── dataset.py             Provenance/evidence-gated, provider-neutral SFT export
+
+├── k8s/                       Kubernetes alternative deployment bundle and ordered release script
+│
 ├── packages/janus-sandbox/    Standalone, zero-dependency extraction of the
 │                             container-isolation logic — independently
 │                             installable, not coupled to the rest of Janus
@@ -149,8 +154,11 @@ the core function. Janus 2.0 uses a **Reviewer-First** loop:
      contexts rendered into distinct prompt slots.
    - Reviewer critiques. If it finds a real issue, it must write an
      executable counterexample and confirm it fails via `run_candidate_test`
-     — not the general `run_tests` sweep (see §5.4 for why this distinction
-     is load-bearing, not stylistic).
+     — not the general `run_tests` sweep (see §5.4 for why this distinction is
+     load-bearing, not stylistic). If the exact test does not execute and report
+     a failure, Janus normalizes `ISSUE_FOUND` to `INCONCLUSIVE`, requests human
+     review, and does not invoke remediation.
+
    - Run the gate (`run_full_gate`), scoped to `target_file` for the static
      checks (§5.3).
    - Persist the round (`_persist_round`) — every round, not just the final
@@ -182,6 +190,14 @@ Every LLM call goes through `_ask()`, which layers:
 - **Cost tracking** per call, aggregated per debate, with a per-key breakdown
   (`calls_per_key`) so usage skew across pooled keys is visible without ever
   logging a raw key.
+
+Debate controls are configurable and fail closed: `ADV_REVIEW_MAX_ROUNDS` must
+be at least one, `ADV_REVIEW_CIRCUIT_FAILURE_THRESHOLD` must be at least one,
+and `ADV_REVIEW_CIRCUIT_COOLDOWN_SECONDS` cannot be negative. The effective
+Reviewer verdict, repository-context signal availability, max-round cap, and
+rejected/confirmed counterexample evidence are exported as Prometheus metrics
+so thresholds can be calibrated from observations rather than treated as
+self-tuning claims. A thread-safe breaker permits only one half-open probe.
 
 ---
 
@@ -318,16 +334,16 @@ permanent architecture — see `ROADMAP.md` §Fine-tuning.
 Answers "what does *this* repo actually look like." Re-read fresh from the
 live sandbox every round (so it always reflects the current patch), three
 signals:
-- **Call graph neighbors** — AST-based, one hop: which files reference
-  `target_file`'s definitions, and what `target_file` calls that it doesn't
-  define. Verified against `pluggy`: correctly found all 19 files in the
-  repo referencing `_hooks.py`'s definitions.
+- **Call graph neighbors** — one hop: Python callers and callees use AST-derived
+  symbols, so comments and string literals do not create false edges. Non-Python
+  files use a conservative identifier fallback; malformed Python is fail-soft
+  and does not guess symbols. Verified with Python, TypeScript, and Go regression
+  fixtures, but not a corpus-level benchmark across real repositories.
 - **Prior fix commits** — `git log` on `target_file`, filtered to messages
   containing a fix-related keyword. A bug fixed once and reintroduced is a
-  high-value catch. Requires the sandbox to actually be a git repo (it
-  usually is — `shutil.copytree` preserves `.git`; this only fails if the
-  *source* repo itself has no git history, which was previously
-  misdocumented as a `sandbox_copy` limitation — it isn't one).
+  high-value catch. Structural scans use the mutable candidate sandbox, while
+  prior-fix history can be read from the original source repository when an
+  archive/materialized candidate has no `.git` directory.
 - **Test conventions** — samples existing test files to inform the
   Reviewer's writing style. Checks `settings.REPO_CONTEXT_TEST_DIR_NAMES`
   (default: `tests`, `testing`, `test`) in order, not hardcoded to `tests`
@@ -506,6 +522,10 @@ combination on newer pytest versions):
 | `eval_async_lifecycle.py` | MCP/toolset teardown bounds, thread offloading, and LLM stream deadlines |
 | `eval_github_app.py` | HMAC signatures, trigger parsing, and file filtering with mocked GitHub calls; no live App/repository webhook flow |
 | `eval_github_credentials.py` | Installation-scoped token minting, tenant-aware caching, and legacy fallback |
+| `eval_config.py` | Fail-closed debate control validation and Prometheus calibration metrics |
+| `eval_corpus.py` | Curated Python/TypeScript/Go regression fixtures; not a real-repository corpus benchmark |
+| `eval_kubernetes.py` | Offline Kustomize rendering and deployment-boundary checks; no live cluster |
+| `eval_training_data.py` | Provenance/evidence-gated dataset export; no model training or provider upload |
 | `eval_reviewer.py` | Integration test — full debate against a real Gemini API key, marked `pytest.mark.integration` |
 
 A recurring theme worth naming: several real bugs (a broken relationship on
@@ -526,8 +546,11 @@ validates the seams between them.
 
 The Janus 2.0 implementation, security hardening, GitHub App credential
 isolation, DNS-rebinding protection, gate baseline diffing, async lifecycle
-mitigation, and admin dashboard are implemented and regression-tested. Two
-items must remain distinct:
+mitigation, admin dashboard, stricter Reviewer evidence enforcement, configurable
+calibration telemetry, multi-language regression fixtures, and an offline-
+rendered Kubernetes deployment path are implemented. The Kubernetes path has
+not been validated against a live cluster, and the curated fixtures are not a
+corpus-level benchmark. Three items must remain distinct:
 
 - **Async event-loop stall root cause — unresolved**: after a real failing LLM
   call sequence involving MCP, `_persist_session_end` was observed not to
@@ -536,13 +559,14 @@ items must remain distinct:
   confirmed. The operational mitigation is active: persistence and blocking
   worker work use `asyncio.to_thread`, persistence has bounded timeouts, LLM
   streams have deadlines, and MCP teardown is shielded and bounded.
-- **Fine-tuning the Reviewer is the one architecturally unstarted layer.**
-  Repo-context retrieval, behavioral retrieval, and executable proof are built;
-  fine-tuning remains deferred because the behavioral store is a 25-example
-  seed set and repo-context retrieval is name-based scanning rather than mature
-  static analysis. Revisit after the retrieval store grows substantially and
-  repo-context signals are validated across more repositories, or when a real
-  fine-tuning-shaped Reviewer failure is observed rather than hypothesized.
+- **Fine-tuning the Reviewer remains unstarted as a model-training operation.**
+  `training/dataset.py` now implements a real integration boundary: records must
+  carry repository/PR/review/commit provenance and executable before/after
+  evidence, and export is provider-neutral. The 25-example retrieval seed is
+  intentionally rejected because it lacks that lineage. No training job, model
+  upload, or trained weights are claimed. Revisit after a substantially larger,
+  audited corpus exists and retrieval/context signals have been evaluated across
+  more repositories.
 
 The reproduction script and `py-spy` workflow in `Roadmap.md` remain available
 for diagnosis in a persistent terminal; the unresolved investigation must not

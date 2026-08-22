@@ -9,18 +9,11 @@ construction, never invoked against the real API here.
 from __future__ import annotations
 
 import dataclasses
-import sys
-import time
-
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from core.config import settings  # noqa: E402
-from core.llm_client import (  # noqa: E402
-
+from core.config import settings
+from core.llm_client import (
     KeyPool,
     _KeyedGemini,
     build_model,
@@ -74,11 +67,13 @@ def test_cooldown_skips_the_rate_limited_key():
     assert 1 not in picks
 
 
-def test_cooldown_expires_after_the_configured_duration():
+def test_cooldown_expires_after_the_configured_duration(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("core.llm_client.time.monotonic", lambda: clock[0])
     pool = KeyPool(keys=["a", "b"], cooldown_seconds=0.05)
     pool.mark_rate_limited(0)
     assert 0 not in [pool.get_key()[1] for _ in range(4)]
-    time.sleep(0.06)
+    clock[0] += 0.06
     picks = [pool.get_key()[1] for _ in range(4)]
     assert 0 in picks
 

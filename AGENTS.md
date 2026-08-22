@@ -14,7 +14,9 @@ storage, a queue-based worker, and observable infrastructure.
 
 **What is real:**
 - Structural role asymmetry enforced via MCP tool filters (not just prompts)
-- A Reviewer that can only prove bugs exist via executable counterexamples
+- A Reviewer whose `ISSUE_FOUND` verdict is accepted only after an exact newly
+  written counterexample executes and reports a failure; otherwise the verdict
+  is normalized to `INCONCLUSIVE`
 - Language-agnostic validation via `janus.yaml`
 - Reviewer-first debate loop (Patcher is reactive)
 - Multi-provider BYOK support (Gemini, Claude, GPT, etc.)
@@ -28,6 +30,11 @@ storage, a queue-based worker, and observable infrastructure.
 - A retrieval pipeline that can be grown (batch ingestion) without redeployment
 - Production infrastructure: persistence, authenticated API, observability,
   concurrency, CI/CD
+- Configurable, fail-closed debate controls with Prometheus calibration metrics
+  for verdicts, evidence acceptance/rejection, repository-context signals, and
+  max-round termination
+- Curated Python/TypeScript/Go regression fixtures and offline-rendered Kubernetes
+  manifests with an ordered migration release script
 - Async lifecycle hardening: blocking persistence, gate, sandbox, and worker
   DB operations are offloaded; LLM deadlines and bounded MCP teardown mitigate
   the observed event-loop stall, whose third-party root cause remains unconfirmed
@@ -50,13 +57,15 @@ storage, a queue-based worker, and observable infrastructure.
   App registration, installation, public webhook endpoint, and test
   repository. `evals/eval_github_app.py` currently verifies signatures,
   trigger parsing, and file filtering with mocked GitHub calls only.
-- **Fine-tuning the Reviewer is the one architecturally unstarted layer.**
-  Repo-context retrieval, behavioral retrieval, and executable proof are built;
-  fine-tuning remains deferred because the behavioral store is a 25-example
-  seed set and repo-context retrieval is name-based scanning rather than mature
-  static analysis. Revisit after the retrieval store grows substantially and
-  repo-context signals are validated across more repositories, or when a real
-  fine-tuning-shaped Reviewer failure is observed rather than hypothesized.
+- **Fine-tuning the Reviewer remains unstarted as a model-training operation.**
+  `training/dataset.py` and `scripts/prepare_reviewer_dataset.py` provide a
+  provider-neutral boundary that requires repository/PR/review/commit provenance
+  and executable before/after evidence. The 25-example retrieval seed is
+  intentionally rejected by that boundary; no training job or trained weights
+  are claimed. Revisit after a substantially larger audited corpus exists and
+  retrieval/context signals are validated across more repositories.
+- The Kubernetes bundle is render-tested offline but has not been validated
+  against a live cluster, storage class, node pool, or public ingress.
 
 ---
 
@@ -72,6 +81,9 @@ storage, a queue-based worker, and observable infrastructure.
 | **Structural enforcement** | MCP `tool_filter` on `MCPToolset` | MCP `tool_filter` on `MCPToolset` |
 
 The Reviewer outputs one of three verdicts: `PASS`, `ISSUE_FOUND`, or `INCONCLUSIVE`.
+An `ISSUE_FOUND` verdict must be backed by an exact candidate test that pytest
+actually executes and reports as failing; missing, passing, skipped, or
+collection-error evidence is fail-closed as `INCONCLUSIVE` with human review.
 
 The asymmetry is **structural** — the MCP server's tool dispatch enforces it,
 not the prompt. The Reviewer literally cannot exceed its role regardless of
@@ -197,17 +209,18 @@ freshness requirements (re-read every round, so it always reflects the
 current patch, not a periodically-ingested batch).
 
 ### What it retrieves
-- **Call graph neighbors** (`_find_call_graph_neighbors`): AST-based,
-  one hop in each direction — which other `.py` files in the repo reference
-  a name defined in the file under review, and which names the file under
-  review calls that it doesn't define itself. A Reviewer that can't see
+- **Call graph neighbors** (`_find_call_graph_neighbors`): Python callers and
+  callees use AST-derived symbols, one hop in each direction, so comments and
+  string literals do not create false edges. Non-Python files use a conservative
+  identifier fallback; malformed Python is fail-soft. A Reviewer that can't see
   callers can't tell if a signature change breaks something three files away.
 - **Prior fix commits** (`_find_prior_fixes`): `git log` on the target file,
   filtered to messages containing a fix-related keyword
   (`fix`, `bug`, `patch`, `issue`, `crash`, `regression`, `hotfix`). A bug
-  fixed once and reintroduced is a very high-value catch. Degrades to an
-  empty list if the sandbox isn't a git repo — this is expected and handled,
-  not an error.
+  fixed once and reintroduced is a very high-value catch. Structural scans use
+  the mutable candidate sandbox; when it has no `.git`, history can be read
+  from the original source repository. Missing history still degrades to an
+  empty list, not an error.
 - **Existing test conventions** (`_find_test_conventions`): samples other
   test files in the repo's `tests/` directory, excluding any already
   covering the target file, so Reviewer-written counterexamples match this
@@ -225,15 +238,13 @@ surfaced each round is persisted on `Round.repo_context_signals_json`, the
 same way `retrieved_example_ids` is persisted.
 
 ### Known limits
-- Call graph detection is name-based text scanning, not a real static
-  analysis pass — it will produce false positives (a name matching text
-  that isn't actually a call) and false negatives (aliased imports,
-  dynamic dispatch). Sufficient as a first signal, not a substitute for a
-  proper AST-resolved call graph if this becomes a priority later.
-- Git history requires the sandbox to be a real git repo with history —
-  a plain directory copy (the common case today) yields no prior-fix
-  signal, silently. Worth revisiting if git history is desired: sandbox
-  creation would need to preserve `.git` rather than being a flat copy.
+- Python caller/callee matching now uses AST-derived symbols, while
+  non-Python matching remains a conservative regex fallback. Aliased imports,
+  dynamic dispatch, and full language-semantic resolution remain out of scope.
+- A materialized candidate without `.git` can use the original source repo for
+  prior-fix history; repositories with no usable source history still yield no
+  prior-fix signal.
+
 - Every signal is best-effort and degrades independently — a Reviewer with
   partial repo context should still be better off than one with none, but
   none of this is exhaustive.
@@ -284,21 +295,24 @@ the others:
   evidence instead of opinion — nothing merges on a critique alone.
 
 Both retrieval layers now exist, but neither is mature: the behavioral
-store is a 25-example seed set (§5's known limits) and repo-context
-retrieval is name-based text scanning, not a resolved call graph, and
-loses git history entirely on a non-git sandbox (§6's known limits).
-Fine-tuning stays deferred until growing and hardening both of these is a
-worse investment than starting on learned review skill directly — that
-point hasn't been reached yet.
+store is a 25-example seed set (§5's known limits), and repository-context
+signals are not a corpus-level static-analysis benchmark. Fine-tuning stays
+deferred until growing and hardening both of these is a worse investment than
+starting on learned review skill directly — that point has not been reached.
+The implemented `training/dataset.py` boundary rejects retrieval-only records:
+future examples must carry repository/PR/review/commit provenance and executable
+before/after evidence. It exports provider-neutral JSONL but does not train,
+upload, or claim model weights.
 
 To replace the retrieval-augmented Reviewer with a fine-tuned one once that
 point is reached:
 
 1. **Training data**: Mine PR review comments from a large set of repos.
-   For each comment, check if the lines it points at were touched again
-   within ~30 days by a commit whose message suggests a fix. Label
-   these as "real catches." Down-weight or discard comments with no
-   follow-up fix.
+   For each comment, retain repository/PR/review IDs, source and fix commits,
+   the exact counterexample command/path, and independently reproduced
+   before/after outcomes. `training/dataset.py` validates this boundary and
+   `scripts/prepare_reviewer_dataset.py` exports provider-neutral JSONL; it
+   does not fabricate missing lineage or launch a training job.
 
 2. **Model requirements**: The fine-tuned Reviewer must:
    - Accept `agents.REVIEWER_INSTRUCTION_TEMPLATE` (or a simplified version

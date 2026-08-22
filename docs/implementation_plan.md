@@ -7,7 +7,7 @@ For live status and deliberate future work, see [`Roadmap.md`](Roadmap.md). For 
 ## Guiding principles
 
 - The Patcher is a responder, not an initiator; it runs only after the Reviewer proves a concrete issue.
-- The Reviewer must support a critique with an executable counterexample and cannot edit source files or call the full gate.
+- The Reviewer must support `ISSUE_FOUND` with an exact executable counterexample; if pytest does not execute and fail that test, Janus normalizes the verdict to `INCONCLUSIVE` and requests human review. The Reviewer cannot edit source files or call the full gate.
 - The deterministic gate has sole merge authority; no LLM verdict can override a failed required check.
 - Language-specific validation is repository configuration through `janus.yaml`, not hard-coded debate logic.
 - Tenant isolation, secret isolation, sandbox boundaries, and fail-closed behavior are enforced at multiple layers.
@@ -20,7 +20,7 @@ For live status and deliberate future work, see [`Roadmap.md`](Roadmap.md). For 
 | **1. Core engine restructure** | Reviewer-first flow with `PASS`, `ISSUE_FOUND`, and `INCONCLUSIVE` verdicts; Patcher runs only for `ISSUE_FOUND`; per-round and final persistence | `core/orchestrator.py`, `storage/models.py` |
 | **2. Generic validation interface** | `janus.yaml` custom checks with backward-compatible default checks; configurable repository validation | `core/repo_config.py`, `core/validation.py`, `core/gate.py` |
 | **3. Language-agnostic prompts** | Target-language detection, generic code extraction, and prompts that do not assume Python | `core/language.py`, `core/agents.py`, `core/orchestrator.py` |
-| **4. Repository-context generalization** | Graceful non-Python behavior plus per-round call-graph, prior-fix, and test-convention retrieval | `core/repo_context.py`, `core/orchestrator.py` |
+| **4. Repository-context generalization** | Graceful non-Python behavior plus AST-derived Python callers/callees, conservative fallback matching, source-repository history fallback, and per-round test-convention retrieval | `core/repo_context.py`, `core/orchestrator.py` |
 | **5. Multi-provider LLM and BYOK** | Gemini key pooling plus provider-specific model configuration for supported LiteLLM providers; BYOK encrypted at rest and decrypted only in worker memory | `core/llm_client.py`, `core/credentials.py`, `core/config.py` |
 | **6. GitHub App and product layer** | HMAC-verified webhooks, installation registration/revocation, manual and opt-in automatic triggers, fork protection, exact-commit materialization, notifications, and tenant-scoped credentials | `api/github_app.py`, `core/github_credentials.py`, `core/github_materializer.py`, `core/notifications.py` |
 | **7. Enterprise auto-merge** | Optional SHA-pinned merge only when repository opt-in, deterministic gate, trusted branch, trusted author, and no human-review flag all pass | `core/auto_merge.py`, `core/worker.py`, `core/repo_config.py` |
@@ -37,20 +37,26 @@ The post-migration hardening work is also complete and regression-tested:
 - Blocking database, gate, sandbox, and worker operations are moved off async event loops; LLM deadlines and bounded shielded MCP teardown mitigate the persistence/event-loop freeze risk.
 - Admin visibility provides a fail-closed `ADMIN_API_KEYS` role tier, cross-tenant non-sensitive summaries through `GET /admin/debates`, and the `/admin` operator dashboard. Tenant and admin credentials are disjoint.
 - Queue claiming is atomic, zombie sessions are swept, per-round state is persisted, and structured logs and Prometheus metrics expose operational outcomes without logging secrets.
+- Reviewer evidence is fail-closed, debate controls validate safe bounds, and telemetry exposes verdicts, evidence, repository-context availability, and max-round caps for calibration.
+- Curated Python/TypeScript/Go regression fixtures broaden local coverage without being represented as a real-repository benchmark.
+- `k8s/` provides an offline-rendered alternative with a dedicated Docker-socket worker, Docker CLI in the service image, explicit API gate isolation, immutable image wiring, and ordered `k8s/deploy.sh` migration rollout.
+- `training/dataset.py` and `scripts/prepare_reviewer_dataset.py` validate provenance/evidence-gated records and export provider-neutral JSONL; they do not train or upload a model.
 
 ## Verification record
 
-The complete evaluation command runs every `evals/eval_*.py` module. The latest full run completed with **224 passed, 4 skipped, and 4 warnings**. Skips are integration cases requiring real external credentials. GitHub App coverage in `evals/eval_github_app.py` is unit/regression-level with mocked `_github_get` calls; a live installed-App webhook flow against a real repository and public endpoint has not yet been run. The Mermaid workflow in `JANUS_WORKFLOW.mmd` provides the corresponding end-to-end control-flow view, while live external-infrastructure validation remains an operational follow-up.
+The complete evaluation command runs every `evals/eval_*.py` module. The final non-integration run completed with **254 passed, 3 skipped, 1 deselected integration test, and 4 warnings**. The previous baseline was 224 passed, 4 skipped, and 4 warnings. Skips and deselection are integration cases requiring real external credentials.
+GitHub App coverage in `evals/eval_github_app.py` is unit/regression-level with mocked `_github_get` calls; a live installed-App webhook flow against a real repository and public endpoint has not yet been run. Kubernetes validation is offline rendering only. The Mermaid workflow in `JANUS_WORKFLOW.mmd` provides the corresponding end-to-end control-flow view.
 
 ## Deliberate future work
 
-**Fine-tuning the Reviewer is the one architecturally unstarted layer.**
-Repo-context retrieval, behavioral retrieval, and executable proof are built,
-but the behavioral store is still a 25-example seed set and repo-context
-retrieval is name-based scanning rather than mature static analysis. Revisit
-fine-tuning after the retrieval store grows substantially and repo-context
-signals are validated across more repositories, or after a real
-fine-tuning-shaped Reviewer failure is observed rather than hypothesized.
+**Fine-tuning the Reviewer remains unstarted as a model-training operation.**
+The provider-neutral `training/dataset.py` boundary now requires repository/PR/
+review/source/fix commit provenance and executable before/after evidence, and
+exports chat JSONL without contacting a provider. The 25-example retrieval seed
+is intentionally rejected because it lacks this lineage. Revisit fine-tuning
+after the retrieval store grows substantially, repository-context signals are
+validated across more repositories, and a real fine-tuning-shaped failure is
+observed rather than hypothesized.
 Optional persistent-environment diagnosis of third-party MCP compatibility
 behavior may provide additional root-cause detail, but it is not a prerequisite
 for normal operation of the implemented Janus paths.

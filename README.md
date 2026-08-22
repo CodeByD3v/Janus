@@ -42,17 +42,28 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 - **Admin visibility**: a fail-closed admin credential tier, cross-tenant
   debate summaries through `GET /admin/debates`, and the `/admin` operator
   dashboard. Sensitive debate fields are excluded from admin responses.
+- **Reviewer evidence enforcement and calibration telemetry**: an
+  `ISSUE_FOUND` verdict is accepted only when a newly written exact test
+  actually executes and fails; invalid evidence becomes `INCONCLUSIVE`. Debate
+  controls are configurable and verdict, evidence, context, and round-cap
+  metrics are exposed for later calibration.
+- **Deployment alternatives**: the established Docker Compose VM path plus an
+  offline-rendered Kubernetes bundle with a dedicated Docker-socket worker and
+  ordered migration release script.
 
 **What is explicitly future work:**
 
-- **Fine-tuning the Reviewer is the one architecturally unstarted layer.**
-  Repo-context retrieval, behavioral retrieval, and executable proof are built,
-  but the behavioral store is still a 25-example seed set and repo-context
-  retrieval is name-based scanning rather than mature static analysis. The
-  effort should be revisited after the retrieval store grows substantially and
-  repo-context signals are validated across more repositories, or after a real
-  fine-tuning-shaped Reviewer failure is observed. See [AGENTS.md](AGENTS.md)
-  § Fine-Tuning Interface.
+- **Fine-tuning the Reviewer remains unstarted as a model-training operation.**
+  The new `training/dataset.py` and `scripts/prepare_reviewer_dataset.py` form
+  a provider-neutral boundary that rejects records without provenance and
+  executable before/after evidence. The 25-example retrieval seed is not
+  training-ready, and no model training or upload is claimed. See
+  [training/README.md](training/README.md) and [AGENTS.md](AGENTS.md).
+- **Live infrastructure validation remains pending.** The Kubernetes bundle
+  has offline render and manifest regressions but no target cluster; GitHub App
+  end-to-end validation still needs a real App, public endpoint, and repository;
+  and the async MCP/event-loop root cause still needs persistent-terminal plus
+  `py-spy` diagnosis.
 
 ---
 
@@ -85,6 +96,14 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 ├── retrieval_pipeline/
 │   ├── schema.py                      RealCatchExample Pydantic model
 │   └── ingest.py                      Batch ingestion CLI
+│
+├── training/
+│   ├── dataset.py                     Provenance/evidence-gated SFT export
+│   └── README.md                      Fine-tuning boundary and data requirements
+│
+├── k8s/
+│   ├── *.yaml                         Kubernetes alternative manifests
+│   └── deploy.sh                      Ordered immutable-image release script
 │
 ├── data/
 │   └── real_catch_examples.seed.jsonl 25 curated "real catch" examples
@@ -241,7 +260,10 @@ command details.
 | `ADV_REVIEW_MODEL` | No | `gemini-2.5-flash` | LLM model |
 | `USE_CONTAINERIZED_GATE` | No | `false` | Docker sandbox |
 | `SANDBOX_IMAGE` | If containerized | `adv-review-sandbox:latest` | Sandbox image |
-| `ADV_REVIEW_MAX_ROUNDS` | No | `5` | Debate round cap |
+| `ADV_REVIEW_MAX_ROUNDS` | No | `5` | Debate round cap; must be at least 1 |
+| `ADV_REVIEW_CIRCUIT_FAILURE_THRESHOLD` | No | `5` | Consecutive LLM failures before opening the breaker; must be at least 1 |
+| `ADV_REVIEW_CIRCUIT_COOLDOWN_SECONDS` | No | `60` | Breaker cooldown before one half-open probe; cannot be negative |
+
 | `CHROMA_PERSIST_DIR` | No | `./chroma_store` | Vector store path |
 | `LOG_LEVEL` | No | `INFO` | Log level |
 | `WORKER_POLL_INTERVAL` | No | `5` | Worker poll seconds |
@@ -266,7 +288,7 @@ Provide `GITHUB_APP_PRIVATE_KEY` through the deployment secret manager (or an eq
 migrations, then **actually rolls the new images out** — it doesn't stop at
 "pushed to a registry" (GAP 16).
 
-### Chosen target: a single VM via SSH + docker-compose, not Kubernetes
+### Established target: a single VM via SSH + docker-compose
 
 The worker mounts the Docker socket to spawn sandbox containers for the gate
 (`gate.py`'s container isolation — see `docker-compose.prod.yml`'s `worker`
@@ -278,21 +300,26 @@ service). That one dependency shapes the whole deployment decision:
   all, not just awkwardly.
 - **Kubernetes is possible, but not free.** Running the worker as a pod that
   can spawn sandbox containers means either a Docker-in-Docker sidecar or
-  mounting the host's Docker socket into the pod — both require the pod to
-  run **privileged**, which most managed clusters (GKE Autopilot, EKS with
-  Pod Security Standards enforced, etc.) restrict or block outright for
-  good reasons. If you go this route, budget for a dedicated node pool with
-  relaxed pod security policy for worker pods specifically, and treat that
-  node pool as a smaller trust boundary than the rest of the cluster.
+  mounting the host's Docker socket into the pod. The implemented bundle uses
+  the latter with a non-root worker, read-only socket mount, explicit socket
+  group configuration, and a dedicated tainted node pool. The socket still
+  represents broad host control, and many managed clusters restrict or block
+  this pattern for good reasons. Treat that node pool as a smaller trust
+  boundary than the rest of the cluster and validate its Pod Security policy
+  explicitly.
+
 - **A plain VM avoids the tradeoff entirely** — the whole point of choosing
   it here. `docker-compose.prod.yml` mirrors `docker-compose.yml`'s
   topology but pulls pre-built, pre-tested images from the registry instead
   of building from source on the deploy host.
 
 If your priorities differ — you're already running Kubernetes for
-everything else, or you need the deploy host itself to be untrusted — the
-Kubernetes path is real and buildable, it's just a genuinely different
-security posture than what's implemented here, not a drop-in swap.
+ everything else, or you need the deploy host itself to be untrusted — use the
+ implemented `k8s/` path and its ordered `k8s/deploy.sh` release script. It
+ requires a dedicated node pool for the worker's Docker-socket boundary,
+ deployment-specific socket-group configuration, RWX storage for the shared
+ cache volumes, and live cluster validation. It is not a drop-in security
+ equivalent to the VM path.
 
 ### Required GitHub secrets
 
@@ -392,10 +419,14 @@ nothing here claims fine-tuned weights exist. See
   deadlines; and MCP teardown is bounded with shielded cleanup. A persistent
   terminal plus `py-spy` is still needed to finish third-party MCP diagnosis;
   see `docs/Roadmap.md` §3–§4.
-- Seed retrieval store has 25 examples — quality improves as it grows
-
-- `MAX_ROUNDS = 5` is not calibrated against measured false-positive rates
-- Demo scope is a single Python file; no corpus-level evaluation yet
-- The Reviewer sometimes gives prose critiques without executable tests
-  (tracked via `reviewer_skipped_counterexample` metric)
-- Circuit breaker thresholds are not auto-tuned
+- Seed retrieval store has 25 examples — quality improves as it grows.
+- `MAX_ROUNDS` and circuit-breaker thresholds are configurable and instrumented
+  for calibration, but are not auto-tuned or validated against production
+  false-positive rates.
+- The committed Python/TypeScript/Go fixtures are regression coverage, not a
+  corpus-level evaluation across many real repositories.
+- Prose `ISSUE_FOUND` critiques without executable failing evidence are now
+  rejected and normalized to `INCONCLUSIVE`; their rejected/confirmed counts
+  remain observable through metrics.
+- The async event-loop root cause and live GitHub/Kubernetes infrastructure
+  validation remain external-infrastructure work.

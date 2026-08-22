@@ -20,7 +20,6 @@ import json
 import logging
 import sys
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -226,6 +225,38 @@ class MetricsRegistry:
         default_factory=lambda: Counter(
             "acr_reviewer_skipped_counterexample_total",
             "Times Reviewer gave prose critique without a test",
+        )
+    )
+    reviewer_counterexamples_confirmed: Counter = field(
+        default_factory=lambda: Counter(
+            "acr_reviewer_counterexamples_confirmed_total",
+            "Times Reviewer evidence executed and failed as required",
+        )
+    )
+    reviewer_evidence_rejected: Counter = field(
+        default_factory=lambda: Counter(
+            "acr_reviewer_evidence_rejected_total",
+            "Times Reviewer ISSUE_FOUND evidence was missing or invalid",
+        )
+    )
+    reviewer_verdicts: LabeledCounter = field(
+        default_factory=lambda: LabeledCounter(
+            "acr_reviewer_verdicts_total",
+            "Reviewer verdict distribution",
+            "verdict",
+        )
+    )
+    debates_max_rounds: Counter = field(
+        default_factory=lambda: Counter(
+            "acr_debates_max_rounds_total",
+            "Debates stopped because the configured round cap was reached",
+        )
+    )
+    repo_context_signals: LabeledCounter = field(
+        default_factory=lambda: LabeledCounter(
+            "acr_repo_context_signals_total",
+            "Repository-context signal availability by signal type",
+            "signal",
         )
     )
     code_extraction_failed: Counter = field(

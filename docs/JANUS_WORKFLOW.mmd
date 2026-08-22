@@ -27,7 +27,7 @@ flowchart TD
         QUEUE["Queued session state"]
         ROUND_DB["Per-round persistence<br/>reviewer text, patch, gate result,<br/>retrieval signals, stop reason"]
         FINAL_DB["Final state persistence<br/>merged/rejected/error, verdict,<br/>human-review flag, cost, gate result"]
-        METRICS["Structured logs + Prometheus metrics<br/>debates, rounds, gate checks, retries,<br/>costs, cleanup, and failure states"]
+        METRICS["Structured logs + Prometheus metrics<br/>debates, rounds, gate checks, retries,<br/>costs, cleanup, verdict/evidence/context signals,<br/>max-round cap, and failure states"]
     end
 
     subgraph WORKER["3. Queue worker and repository materialization"]
@@ -70,7 +70,9 @@ flowchart TD
         EXTRACT["Extract fenced code<br/>missing block => retain previous code<br/>and record extraction failure"]
         WRITE["Write candidate source<br/>only inside candidate sandbox"]
         ROUND_GATE["Run candidate validation gate<br/>and baseline comparison"]
-        COUNTEREXAMPLE["Reviewer counterexample requirement<br/>new test must be written and run directly<br/>by exact filename"]
+        COUNTEREXAMPLE["Reviewer counterexample requirement<br/>new test must be written and run directly<br/>by exact relative filename"]
+        EVIDENCE_VALIDATE["Execute exact new test<br/>pytest reports an actual failure?"]
+        EVIDENCE_REJECT["Evidence rejected<br/>passing/skipped/collection-error/missing<br/>=> INCONCLUSIVE + human review"]
         REREVIEW["Reviewer re-reviews patched code<br/>with refreshed retrieval context"]
         LOOP_DECISION{"Stop after re-review?"}
         NEXT_ROUND["Persist round immediately<br/>update current code and critique"]
@@ -108,6 +110,26 @@ flowchart TD
         ADMIN_AUTH["GET /admin/debates<br/>admin key role required<br/>missing => 401; tenant key => 403"]
         ADMIN_FILTER["Cross-tenant summaries<br/>tenant_id/status/limit/offset filters"]
         ADMIN_SAFE["Sensitive fields excluded<br/>no ticket, webhook URL, encrypted BYOK,<br/>transcripts, or gate command details"]
+    end
+
+    subgraph K8S["8. Kubernetes alternative deployment path"]
+        K8S_IMAGES["Build service + sandbox images<br/>same immutable Git SHA"]
+        K8S_INFRA["Apply namespace, ConfigMap, storage,<br/>and Postgres StatefulSet"]
+        K8S_DB_READY["Wait for Postgres readiness"]
+        K8S_MIGRATE["Apply immutable migration Job<br/>wait for completion; failure blocks rollout"]
+        K8S_APPS["Apply API + worker Kustomization<br/>API gate false; worker Docker socket node pool"]
+        K8S_ROLLOUT["Wait for API/worker rollout"]
+        K8S_IMAGES --> K8S_INFRA --> K8S_DB_READY --> K8S_MIGRATE --> K8S_APPS --> K8S_ROLLOUT
+    end
+
+    subgraph DATA["9. Offline Reviewer training-data boundary — no runtime training"]
+        DATA_SOURCE["Audited real-catch JSONL<br/>repository/PR/review/commit lineage"]
+        DATA_VALIDATE["Validate required provenance<br/>and executable before/after evidence"]
+        DATA_REJECT["Reject retrieval-only or incomplete records<br/>including the 25-example seed"]
+        DATA_EXPORT["Export provider-neutral chat JSONL<br/>no provider upload or model job"]
+        DATA_SOURCE --> DATA_VALIDATE
+        DATA_VALIDATE -->|invalid| DATA_REJECT
+        DATA_VALIDATE -->|valid| DATA_EXPORT
     end
 
     subgraph ISOLATION["7. Security and lifecycle invariants"]
@@ -176,7 +198,10 @@ flowchart TD
     REVIEW_CALL --> INITIAL_VERDICT
     INITIAL_VERDICT -->|PASS| PASS0
     INITIAL_VERDICT -->|INCONCLUSIVE| INCONCLUSIVE0
-    INITIAL_VERDICT -->|ISSUE_FOUND| ISSUE0
+    INITIAL_VERDICT -->|ISSUE_FOUND| EVIDENCE_VALIDATE
+    EVIDENCE_VALIDATE -->|confirmed failing test| ISSUE0
+    EVIDENCE_VALIDATE -->|no executable failure| EVIDENCE_REJECT
+    EVIDENCE_REJECT --> INCONCLUSIVE0
     REVIEW_CALL -->|runtime failure after retries| WORKER_ERROR
 
     %% Initial verdict branches
@@ -190,7 +215,9 @@ flowchart TD
     EXTRACT --> WRITE
     WRITE --> ROUND_GATE
     ROUND_GATE --> COUNTEREXAMPLE
-    COUNTEREXAMPLE --> REREVIEW
+    COUNTEREXAMPLE --> EVIDENCE_VALIDATE
+    COUNTEREXAMPLE -->|test cannot be executed| EVIDENCE_REJECT
+    EVIDENCE_VALIDATE -->|confirmed failing test| REREVIEW
     REREVIEW --> LOOP_DECISION
     LOOP_DECISION -->|PASS| GATE_ENTRY
     LOOP_DECISION -->|INCONCLUSIVE| HUMAN

@@ -16,13 +16,16 @@ below set it explicitly; the README environment table also documents it.
 Janus 2.0 is implemented and regression-tested. The REST API, deterministic
 gate with isolation and baseline diffing, both retrieval systems, multi-key
 and multi-provider LLM support, GitHub App integration, notifications,
-admin visibility, auto-merge controls, and the documented security fixes are
-in place. The `_persist_session_start` insert-vs-upsert collision was found
-through a real API+worker run and fixed. Async persistence is thread-offloaded
-and timeout-bounded, MCP teardown is shielded and bounded, and lifecycle
-regressions cover event-loop continuity. The only deliberate product work
-remaining is Reviewer fine-tuning; optional diagnosis of third-party MCP root
-causes remains documented in `docs/Roadmap.md`.
+admin visibility, auto-merge controls, stricter Reviewer executable-evidence
+normalization, configurable debate controls, multi-language regression fixtures,
+and the documented security fixes are in place. The `_persist_session_start`
+insert-vs-upsert collision was found through a real API+worker run and fixed.
+Async persistence is thread-offloaded and timeout-bounded, MCP teardown is
+shielded and bounded, and lifecycle regressions cover event-loop continuity. A
+provider-neutral training-data boundary is implemented, but model fine-tuning
+is not performed. Optional diagnosis of third-party MCP root causes and live
+Kubernetes/GitHub infrastructure validation remain documented in
+`docs/Roadmap.md`.
 
 ---
 
@@ -215,7 +218,14 @@ real regression. Always verify a suspicious failure by running the single
 file alone before treating it as real.
 
 ```bash
-# No real GOOGLE_API_KEY needed for these eight — eval_llm_client.py
+# No real GOOGLE_API_KEY needed for these evals; CI discovers every
+# evals/eval_*.py module and excludes only the integration marker:
+$env:GOOGLE_API_KEYS="dummy-a,dummy-b"
+pytest evals/eval_*.py -q -m "not integration"
+
+# No real GOOGLE_API_KEY needed for these older individual commands:
+# eval_llm_client.py
+
 # constructs a real KeyPool object in some tests, which requires *a*
 # key to exist even though it's never actually called, so set a dummy
 # value for that one:
@@ -237,6 +247,11 @@ pytest evals/eval_reviewer.py -v -m integration
 not fail, when Docker isn't present.
 
 ### 5.2 What each file actually covers
+
+The committed Python/TypeScript/Go corpus fixtures are regression fixtures,
+not a benchmark over many real repositories. `eval_kubernetes.py` validates
+offline Kustomize rendering and boundary invariants; it does not replace a live
+cluster rollout.
 
 | File | Covers | Needs Docker | Needs `GOOGLE_API_KEY` |
 |---|---|---|---|
@@ -307,13 +322,35 @@ On push to `main`: builds and pushes both images (service + sandbox),
 migrates the database, then **actually rolls the new images out** and
 health-checks the result — it doesn't stop at "pushed to a registry."
 
-Target: a single VM via SSH + `docker-compose.prod.yml`, deliberately not
-Kubernetes or a serverless platform — the worker needs to spawn sibling
-sandbox containers, which serverless platforms don't allow and most
-managed Kubernetes clusters restrict via Pod Security Standards. See
-README.md's "Production Deployment" section for the full reasoning, the
-required GitHub secrets table, and one-time deploy-host setup steps — not
-duplicated here since that section is current and accurate.
+Target: a single VM via SSH + `docker-compose.prod.yml`; the worker needs to
+spawn sibling sandbox containers, which serverless platforms don't allow and
+many managed Kubernetes clusters restrict. The implemented Kubernetes
+alternative is below. See README.md's "Production Deployment" section for the
+full VM reasoning and required GitHub secrets.
+
+### 6.3 Kubernetes alternative (`k8s/`)
+
+The Kubernetes path is an explicit alternative, not part of the current SSH
+workflow. It uses one API replica until Chroma multiwriter behavior is proven,
+one worker on a dedicated tainted Docker-socket node pool, RWX claims for the
+shared Chroma/repository-cache volumes, and a service image containing the
+Docker CLI. The API overrides `USE_CONTAINERIZED_GATE=false`; only the worker
+uses the host socket.
+
+Create `janus-runtime-secrets` out of band, set the worker deployment's
+`supplementalGroups` to the numeric Docker-socket group for the chosen node
+pool, and run the ordered release script:
+
+```bash
+k8s/deploy.sh "$GIT_COMMIT_SHA"
+```
+
+The script applies Postgres infrastructure, waits for its rollout, runs the
+immutable-tagged migration Job to completion, and only then applies and waits
+for the API/worker deployments. `kubectl apply -k k8s/` intentionally excludes
+the migration Job and should not be treated as an ordered release. The sandbox
+can only render these manifests offline; target-cluster server-side validation,
+RWX storage, node permissions, ingress, and production rollout remain pending.
 
 ---
 
@@ -378,7 +415,9 @@ Grouped as in `core/config.py`. `—` means no default (empty string), not
 ### Debate
 | Variable | Default | Notes |
 |---|---|---|
-| `ADV_REVIEW_MAX_ROUNDS` | `5` | |
+| `ADV_REVIEW_MAX_ROUNDS` | `5` | Must be at least 1; maximum debate rounds |
+| `ADV_REVIEW_CIRCUIT_FAILURE_THRESHOLD` | `5` | Must be at least 1; consecutive failures before open |
+| `ADV_REVIEW_CIRCUIT_COOLDOWN_SECONDS` | `60` | Must be non-negative; delay before one half-open probe |
 
 ### Database
 | Variable | Default | Notes |

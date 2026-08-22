@@ -17,7 +17,6 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Model configuration for BYOK (Bring-Your-Own-Key) — Phase 5
@@ -91,6 +90,20 @@ def _optional_int(name: str, default: int) -> int:
         return default
 
 
+def _optional_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(
+            f"WARNING: env var {name!r} has non-numeric value {raw!r}, using default {default}",
+            file=sys.stderr,
+        )
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable settings container. Constructed once at import time."""
@@ -119,6 +132,12 @@ class Settings:
 
     # --- Debate ---
     MAX_ROUNDS: int = field(default_factory=lambda: _optional_int("ADV_REVIEW_MAX_ROUNDS", 5))
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = field(
+        default_factory=lambda: _optional_int("ADV_REVIEW_CIRCUIT_FAILURE_THRESHOLD", 5)
+    )
+    CIRCUIT_BREAKER_COOLDOWN_SECONDS: float = field(
+        default_factory=lambda: _optional_float("ADV_REVIEW_CIRCUIT_COOLDOWN_SECONDS", 60.0)
+    )
     APP_NAME: str = "adversarial_code_review"
 
     # --- Database ---
@@ -430,6 +449,16 @@ class Settings:
             raise ValueError(
                 "At least one LLM provider credential is required to run debates"
             )
+
+
+    def __post_init__(self) -> None:
+        """Reject unsafe debate-control values instead of silently degrading."""
+        if self.MAX_ROUNDS < 1:
+            raise ValueError("ADV_REVIEW_MAX_ROUNDS must be at least 1")
+        if self.CIRCUIT_BREAKER_FAILURE_THRESHOLD < 1:
+            raise ValueError("ADV_REVIEW_CIRCUIT_FAILURE_THRESHOLD must be at least 1")
+        if self.CIRCUIT_BREAKER_COOLDOWN_SECONDS < 0:
+            raise ValueError("ADV_REVIEW_CIRCUIT_COOLDOWN_SECONDS cannot be negative")
 
 
 # Singleton — constructed once at import time.

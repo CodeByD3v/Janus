@@ -34,38 +34,16 @@ jobs:
       - name: Mypy typecheck
         run: mypy --ignore-missing-imports .
 
-      # ── Eval suites (unit-level, no API key needed) ───────
-      # NOTE: each file is listed explicitly rather than pointing pytest
-      # at the evals/ directory. Directory-based collection was found to
-      # silently collect 0 tests against this project's evals/__init__.py
-      # + pyproject.toml testpaths combination on newer pytest — explicit
-      # paths sidestep that entirely and are also just more legible in
-      # CI output (one named step per suite instead of one aggregate run).
-      - name: Eval — gate
-        run: pytest evals/eval_gate.py -v
-
-      - name: Eval — retrieval
-        run: pytest evals/eval_retrieval.py -v
-
-      - name: Eval — API
-        run: pytest evals/eval_api.py -v
-
-      - name: Eval — repository-context retrieval (GAP 14)
-        run: pytest evals/eval_repo_context.py -v
-
-      - name: Eval — multi-key LLM pool (GAP 15)
+      # ── Complete unit/regression evaluation matrix ─────────
+      # Expand the shell glob so every evals/eval_*.py module runs. The
+      # integration-marked suites remain collected but skipped here unless a
+      # real external credential is supplied in their dedicated step below.
+      # This prevents newer regression modules from silently disappearing
+      # from CI when a maintainer forgets to add another explicit step.
+      - name: Eval — all unit and regression modules
         env:
           GOOGLE_API_KEYS: "ci-dummy-key-a,ci-dummy-key-b"
-        run: pytest evals/eval_llm_client.py -v
-
-      - name: Eval — notifications (GAP 17)
-        run: pytest evals/eval_notifications.py -v
-
-      - name: Eval — path safety (repo_ref allowlist, target_file denylist)
-        run: pytest evals/eval_path_safety.py -v
-
-      - name: Eval — storage/db (zombie-session sweeper)
-        run: pytest evals/eval_storage_db.py -v
+        run: pytest evals/eval_*.py -v -m "not integration"
 
       # ── Integration tests (require GOOGLE_API_KEY) ────────
       - name: Eval — reviewer (integration)

@@ -80,6 +80,32 @@ def _regex_symbols(code: str) -> list[str]:
     return sorted(names)
 
 
+def _ast_terminal_name(node: ast.AST) -> str | None:
+    """Return the called symbol name for ``name(...)`` or ``obj.name(...)``."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _python_symbol_usage(code: str) -> tuple[set[str], set[str]]:
+    """Return symbols defined and directly called in valid Python source."""
+    tree = ast.parse(code)
+    defined = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+    }
+    called = {
+        name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (name := _ast_terminal_name(node.func)) is not None
+    }
+    return defined, called
+
+
 def _find_call_graph_neighbors(
     repo_dir: Path,
     target_file: str,
@@ -88,38 +114,31 @@ def _find_call_graph_neighbors(
 ) -> dict[str, list[str]]:
     """Find one-hop definitions, calls, and files that reference definitions.
 
-    Python files use the precise AST path where possible. Other languages,
-    and Python files with temporarily invalid syntax while being reviewed,
-    use conservative regular-expression extraction over files with the same
-    extension. This is intentionally a useful signal rather than a compiler-
-    grade call graph.
+    Valid Python is analyzed with the AST for both the target and candidate
+    callers, so comments, strings, and unrelated identifiers do not create
+    false caller edges. Other languages use conservative regular-expression
+    extraction over files with the same extension. This remains a lightweight
+    graph rather than compiler-grade cross-language resolution.
     """
     if max_files_scanned is None:
         max_files_scanned = settings.REPO_CONTEXT_MAX_FILES_SCANNED
 
     defined_here: set[str] = set()
     called_names: set[str] = set()
+    target_is_python = Path(target_file).suffix.lower() == ".py"
     try:
-        tree = ast.parse(current_code)
+        if target_is_python:
+            defined_here, called_names = _python_symbol_usage(current_code)
+        else:
+            raise SyntaxError("non-Python target uses regex extraction")
     except (SyntaxError, ValueError, TypeError) as exc:
         logger.info("call_graph_ast_fallback", file=target_file, error=str(exc))
-        # Preserve the historical fail-soft behavior for malformed Python:
-        # the reviewer should not receive guessed symbols from broken syntax.
-        # The regex fallback is intended for recognized non-Python files.
-        if Path(target_file).suffix.lower() != ".py":
+        # Malformed Python is intentionally fail-soft: guessed symbols would
+        # be worse than an empty signal while the patch is invalid. Non-Python
+        # targets use the conservative regex extractor.
+        if not target_is_python:
             defined_here.update(_regex_symbols(current_code))
             called_names.update(_CALL_PATTERN.findall(current_code))
-    else:
-        defined_here.update(
-            node.name
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        )
-        called_names.update(
-            node.func.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        )
 
     callers: set[str] = set()
     if defined_here:
@@ -128,7 +147,20 @@ def _find_call_graph_neighbors(
                 text = path.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
-            if any(re.search(rf"\b{re.escape(name)}\b", text) for name in defined_here):
+            if path.suffix.lower() == ".py":
+                try:
+                    _, candidate_calls = _python_symbol_usage(text)
+                except (SyntaxError, ValueError, TypeError):
+                    # Do not turn malformed Python comments or strings into
+                    # caller edges.
+                    continue
+                is_caller = bool(candidate_calls & defined_here)
+            else:
+                is_caller = any(
+                    re.search(rf"\b{re.escape(name)}\s*\(", text)
+                    for name in defined_here
+                )
+            if is_caller:
                 callers.add(str(path.relative_to(repo_dir)))
 
     return {
@@ -222,12 +254,20 @@ def retrieve_repo_context(
     repo_dir: str,
     target_file: str,
     current_code: str,
+    history_repo_dir: str | None = None,
 ) -> dict[str, Any]:
-    """Gather fresh structural facts from the repository under review."""
+    """Gather fresh structural facts from the repository under review.
+
+    ``repo_dir`` is normally the mutable candidate sandbox. When the sandbox
+    came from an archive or intentionally omits ``.git``, ``history_repo_dir``
+    can point to the validated original repository so prior-fix retrieval does
+    not silently lose useful history. Only commit IDs and subjects are exposed.
+    """
     repo_path = Path(repo_dir)
+    history_path = Path(history_repo_dir) if history_repo_dir else repo_path
     config = load_repo_config(repo_dir)
     call_graph = _find_call_graph_neighbors(repo_path, target_file, current_code)
-    prior_fixes = _find_prior_fixes(repo_path, target_file)
+    prior_fixes = _find_prior_fixes(history_path, target_file)
     test_conventions = _find_test_conventions(
         repo_path,
         target_file,
@@ -236,6 +276,7 @@ def retrieve_repo_context(
     logger.info(
         "retrieve_repo_context",
         target_file=target_file,
+        history_repo_dir=str(history_path) if history_repo_dir else None,
         callers=len(call_graph.get("callers", [])),
         prior_fixes=len(prior_fixes),
         test_samples=len(test_conventions),

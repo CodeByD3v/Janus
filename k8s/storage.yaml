@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: janus-chroma
+  labels:
+    app.kubernetes.io/name: janus-chroma
+    app.kubernetes.io/part-of: janus-adversarial-review
+spec:
+  # Requires a StorageClass that supports ReadWriteMany when API replicas
+  # or workers may be scheduled on different nodes.
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: janus-repo-cache
+  labels:
+    app.kubernetes.io/name: janus-repo-cache
+    app.kubernetes.io/part-of: janus-adversarial-review
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 20Gi

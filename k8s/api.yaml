@@ -1,0 +1,162 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: janus-api
+  labels:
+    app.kubernetes.io/name: janus-api
+    app.kubernetes.io/part-of: janus-adversarial-review
+spec:
+  # Keep one API writer until Chroma's multi-process/multi-writer guarantees
+  # are established for this deployment topology.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: janus-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: janus-api
+        app.kubernetes.io/part-of: janus-adversarial-review
+    spec:
+      serviceAccountName: janus-api
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: janus-service
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: janus-config
+          env:
+            # The API serves health and HTTP requests; only the worker invokes
+            # the Docker-isolated gate. This also prevents /healthz from
+            # requiring a Docker socket in the API pod.
+            - name: USE_CONTAINERIZED_GATE
+              value: "false"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: DATABASE_URL
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: GOOGLE_API_KEY
+                  optional: true
+            - name: GOOGLE_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: GOOGLE_API_KEYS
+                  optional: true
+            - name: API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: API_KEYS
+            - name: ADMIN_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: ADMIN_API_KEYS
+                  optional: true
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: GITHUB_WEBHOOK_SECRET
+                  optional: true
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: GITHUB_APP_ID
+                  optional: true
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: GITHUB_APP_PRIVATE_KEY
+                  optional: true
+            - name: BYOK_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: janus-runtime-secrets
+                  key: BYOK_ENCRYPTION_KEY
+                  optional: true
+          volumeMounts:
+            - name: chroma-store
+              mountPath: /app/chroma_store
+            - name: repo-cache
+              mountPath: /app/repos
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 2
+              memory: 2Gi
+      volumes:
+        - name: chroma-store
+          persistentVolumeClaim:
+            claimName: janus-chroma
+        - name: repo-cache
+          persistentVolumeClaim:
+            claimName: janus-repo-cache
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: janus-api
+  labels:
+    app.kubernetes.io/name: janus-api
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: janus-api
+  labels:
+    app.kubernetes.io/name: janus-api
+    app.kubernetes.io/part-of: janus-adversarial-review
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: janus-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

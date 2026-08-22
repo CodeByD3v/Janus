@@ -7,9 +7,10 @@ FROM python:3.12-slim AS base
 LABEL maintainer="janus-team" \
       description="Adversarial code-review service (API + worker)"
 
-# OS-level deps (pg client headers for psycopg2-binary, git for potential VCS ops)
+# OS-level deps. Debian's docker.io package supplies the Docker CLI used by
+# the worker; the daemon is intentionally not started inside this image.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git docker.io \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user

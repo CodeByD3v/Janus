@@ -20,9 +20,13 @@ navigation, not as stable anchors.
 | Deterministic gate + container isolation | Built, verified |
 | Gate baseline diffing | Built, verified; only new pytest failures reject a patch |
 | Gate check scoping (lint/type/security → target_file) | Built, verified |
-| Reviewer counterexample execution (`run_candidate_test`) | Built, verified |
-| Behavioral retrieval | Built, verified |
-| Repository-context retrieval | Built, verified |
+| Reviewer counterexample execution (`run_candidate_test`) | Built, verified; `ISSUE_FOUND` fails closed without an executed failing test |
+| Debate controls and calibration telemetry | Built, verified; configurable and observable, not auto-tuned |
+| Behavioral retrieval | Built, verified; 25-example seed remains immature |
+| Repository-context retrieval | Built, verified; Python AST matching plus conservative non-Python fallback |
+| Multi-language regression fixtures | Built, verified; curated fixtures, not a real-repository corpus benchmark |
+| Kubernetes deployment path | Built and offline-rendered; live cluster/storage validation pending |
+| Reviewer training-data boundary | Built, verified; provider-neutral export, no model training |
 | Multi-key LLM pooling | Built, verified |
 | Deploy pipeline (build → push → migrate → roll out → health-check) | Built, verified |
 | Notifications (PR comment, webhook) | Built, verified |
@@ -1219,7 +1223,7 @@ review against the real repository. This cannot be completed in the sandboxed
 dev environment without real external infrastructure. Treat it as an
 operational validation gap, not as an unimplemented application phase.
 
-### Fine-tuning the Reviewer
+### Fine-tuning the Reviewer and the implemented data boundary
 The target architecture, once ready, is three layers:
 
 ```
@@ -1235,20 +1239,25 @@ looks like without needing fine-tuned weights; fine-tuning would give the
 behavior, at the cost of being expensive to build and prone to going stale
 without retrieval alongside it.
 
-**Why deferred, specifically**: both retrieval layers exist but neither is
-mature enough that the next unit of effort is better spent on fine-tuning
-than on hardening them. The behavioral store is a 25-example seed set. The
-repo-context call graph is name-based text scanning, not a resolved static
-analysis pass. Growing and hardening those is a better investment right now
-than starting a fine-tuning effort on top of an immature retrieval
-foundation.
+**Why model training is deferred, specifically**: both retrieval layers exist
+but neither is mature enough that the next unit of effort is better spent on
+fine-tuning than on hardening them. The behavioral store is a 25-example seed
+set. Repository context now uses AST-derived Python symbols and conservative
+fallbacks, but it is not a corpus-level static-analysis benchmark. Growing and
+hardening those is a better investment right now than training on an immature
+retrieval foundation.
+
+**What is implemented now**: `training/dataset.py` and
+`scripts/prepare_reviewer_dataset.py` define a provider-neutral boundary. A
+record must include repository/PR/review/source/fix commit provenance and an
+exact executable evidence path/command that fails before the fix and passes
+after it. The retrieval seed is intentionally rejected because it lacks these
+fields. No training job, provider upload, or fine-tuned weights are claimed.
 
 **Revisit when**: the retrieval store has grown substantially past its seed
-set (via `retrieval_pipeline/ingest.py`) and the repo-context signals have
-been validated against a wider range of real repos without major gaps —
-or when a fine-tuning-shaped problem (systematic Reviewer weaknesses that
-retrieval can't fix, only learned judgment can) is actually observed in
-practice, not hypothesized.
+set (via `retrieval_pipeline/ingest.py`), the repo-context signals have been
+validated against a wider range of real repos without major gaps, and a
+fine-tuning-shaped problem is observed in practice rather than hypothesized.
 
 ### Admin dashboard / cross-tenant visibility — implemented
 Janus now provides an admin-only `GET /admin/debates` endpoint with tenant,
@@ -1262,6 +1271,19 @@ access. A credential cannot be registered in both the tenant and admin role;
 role collisions are removed and fail closed. Responses contain only
 non-sensitive debate summaries and exclude tickets, webhook URLs, encrypted
 BYOK material, round transcripts, and gate command details.
+
+### Kubernetes deployment path — implemented with live validation pending
+The `k8s/` bundle now includes API, worker, Postgres, storage, ingress, secret
+template, and offline-renderable manifests. The API is intentionally one
+replica until Chroma multiwriter behavior is established. The worker is pinned
+to a dedicated Docker-socket node pool, runs with a deployment-specific
+`supplementalGroups` hook for the host socket GID, and uses a service image that
+contains the Docker CLI. `k8s/deploy.sh` enforces Postgres readiness, migration
+completion, then API/worker rollout using the same immutable image tag.
+
+`kubectl kustomize` and manifest regressions pass in the sandbox. A live cluster,
+RWX storage class, node-pool permission setup, ingress, and server-side dry run
+remain pending external infrastructure.
 
 ### Gate baseline diffing — implemented
 `run_tests` still executes the full suite, unscoped, because narrowing runtime

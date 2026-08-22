@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: janus
+  labels:
+    app.kubernetes.io/name: janus
+    app.kubernetes.io/part-of: janus-adversarial-review

@@ -19,7 +19,7 @@ import pytest
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.repo_context import (  # noqa: E402
+from core.repo_context import (
     format_repo_context_for_prompt,
     retrieve_repo_context,
 )
@@ -97,6 +97,20 @@ def test_call_graph_finds_caller_in_another_file(temp_repo):
     assert "reports.py" in context["call_graph"]["callers"]
 
 
+def test_call_graph_ignores_python_comments_and_strings(temp_repo):
+    (temp_repo / "docs.py").write_text(
+        "# average_price(items) appears only in a comment\n"
+        "description = 'average_price(items)'\n"
+    )
+    current_code = (temp_repo / "inventory.py").read_text()
+    context = retrieve_repo_context(str(temp_repo), "inventory.py", current_code)
+
+    assert "docs.py" not in context["call_graph"]["callers"]
+
+
+
+
+
 def test_call_graph_handles_unparseable_code(temp_repo):
     context = retrieve_repo_context(str(temp_repo), "inventory.py", "def broken(:\n    pass")
     assert context["call_graph"] == {
@@ -122,6 +136,31 @@ def test_prior_fixes_found_in_git_repo(temp_git_repo):
     context = retrieve_repo_context(str(temp_git_repo), "inventory.py", current_code)
     assert len(context["prior_fixes"]) == 1
     assert "fix" in context["prior_fixes"][0]["message"].lower()
+
+
+def test_prior_fixes_can_use_original_repo_when_candidate_lacks_git_metadata(temp_git_repo):
+    candidate = Path(tempfile.mkdtemp(prefix="repo_context_candidate_"))
+    try:
+        shutil.copytree(
+            temp_git_repo,
+            candidate,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(".git"),
+        )
+        current_code = (candidate / "inventory.py").read_text()
+        context = retrieve_repo_context(
+            str(candidate),
+            "inventory.py",
+            current_code,
+            history_repo_dir=str(temp_git_repo),
+        )
+        assert len(context["prior_fixes"]) == 1
+        assert "fix" in context["prior_fixes"][0]["message"].lower()
+    finally:
+        shutil.rmtree(candidate, ignore_errors=True)
+
+
+
 
 
 # ---------------------------------------------------------------------------

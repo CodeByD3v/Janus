@@ -35,15 +35,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
+import threading
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
@@ -51,7 +52,7 @@ from google.genai import types as genai_types
 from core import diagnostics
 from core.agents import build_patcher, build_reviewer, close_agent_toolsets
 from core.config import ModelConfig, settings
-from core.gate import run_full_gate, sandbox_copy
+from core.gate import run_candidate_test, run_full_gate, sandbox_copy
 from core.language import detect_language
 from core.llm_client import get_key_pool, is_rate_limit_error
 from core.observability import CostTracker, LLMCallStats, get_logger, metrics
@@ -122,49 +123,83 @@ class CircuitBreaker:
         self._state = "closed"
         self._consecutive_failures = 0
         self._last_failure_time: float = 0.0
+        self._probe_in_flight = False
+        self._lock = threading.Lock()
 
     @property
     def state(self) -> str:
-        if self._state == "open":
-            elapsed = time.monotonic() - self._last_failure_time
-            if elapsed >= self.cooldown_seconds:
-                self._state = "half_open"
-                logger.info(
-                    "circuit_breaker_half_open",
-                    elapsed=elapsed,
-                    cooldown=self.cooldown_seconds,
-                )
-                metrics.circuit_breaker_state = "half_open"
-        return self._state
+        transitioned = False
+        elapsed = 0.0
+        with self._lock:
+            if self._state == "open":
+                elapsed = time.monotonic() - self._last_failure_time
+                if elapsed >= self.cooldown_seconds:
+                    self._state = "half_open"
+                    self._probe_in_flight = False
+                    transitioned = True
+            state = self._state
+
+        if transitioned:
+            logger.info(
+                "circuit_breaker_half_open",
+                elapsed=elapsed,
+                cooldown=self.cooldown_seconds,
+            )
+            metrics.circuit_breaker_state = "half_open"
+        return state
 
     def record_success(self) -> None:
-        if self._state != "closed":
-            logger.info("circuit_breaker_closed", previous_state=self._state)
-        self._state = "closed"
-        self._consecutive_failures = 0
+        with self._lock:
+            previous_state = self._state
+            self._state = "closed"
+            self._consecutive_failures = 0
+            self._probe_in_flight = False
+        if previous_state != "closed":
+            logger.info("circuit_breaker_closed", previous_state=previous_state)
         metrics.circuit_breaker_state = "closed"
 
     def record_failure(self) -> None:
-        self._consecutive_failures += 1
-        self._last_failure_time = time.monotonic()
-        if self._consecutive_failures >= self.failure_threshold:
-            if self._state != "open":
-                logger.warning(
-                    "circuit_breaker_open",
-                    consecutive_failures=self._consecutive_failures,
-                    threshold=self.failure_threshold,
-                )
-                metrics.circuit_breaker_opens.inc()
-            self._state = "open"
+        opened = False
+        with self._lock:
+            self._consecutive_failures += 1
+            self._last_failure_time = time.monotonic()
+            self._probe_in_flight = False
+            if self._consecutive_failures >= self.failure_threshold:
+                opened = self._state != "open"
+                self._state = "open"
+        if opened:
+            logger.warning(
+                "circuit_breaker_open",
+                consecutive_failures=self._consecutive_failures,
+                threshold=self.failure_threshold,
+            )
+            metrics.circuit_breaker_opens.inc()
+        # Do not consult the property here: with a zero cooldown it can
+        # transition immediately to half_open and misreport the just-opened
+        # breaker. The state update belongs to this transition itself.
+        if opened:
             metrics.circuit_breaker_state = "open"
 
     def allow_request(self) -> bool:
         state = self.state
-        return state in ("closed", "half_open")
+        if state == "closed":
+            return True
+        if state != "half_open":
+            return False
+        with self._lock:
+            if self._probe_in_flight:
+                return False
+            self._probe_in_flight = True
+            return True
 
 
-# Global circuit breaker instance
-_circuit_breaker = CircuitBreaker()
+# Global circuit breaker instance. Threshold and cooldown are explicit settings
+# so operators can tune them from observed provider reliability instead of
+# relying on hidden constants.
+_circuit_breaker = CircuitBreaker(
+    failure_threshold=settings.CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+    cooldown_seconds=settings.CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -257,10 +292,16 @@ async def _ask(
         try:
             start_time = time.monotonic()
 
-            async def _collect_response() -> str:
+            async def _collect_response(
+                current_runner: InMemoryRunner = runner,
+                current_session_id: str = session_id,
+                current_message: genai_types.Content = message,
+            ) -> str:
                 final_text = ""
-                async for event in runner.run_async(
-                    user_id=user_id, session_id=session_id, new_message=message
+                async for event in current_runner.run_async(
+                    user_id=user_id,
+                    session_id=current_session_id,
+                    new_message=current_message,
                 ):
                     if event.content and event.content.parts:
                         for part in event.content.parts:
@@ -360,6 +401,7 @@ def _extract_code(text: str, fallback: str) -> tuple[str, bool]:
 def _check_reviewer_wrote_test(
     sandbox: Path, pre_existing_tests: set[str], reviewer_text: str
 ) -> bool:
+
     """Check if the Reviewer actually wrote a counterexample test file.
 
     Returns True if the Reviewer gave a non-empty critique but wrote no
@@ -371,11 +413,17 @@ def _check_reviewer_wrote_test(
     if verdict in (ReviewerVerdict.PASS, ReviewerVerdict.INCONCLUSIVE):
         return False  # Reviewer is satisfied or inconclusive, no test expected
 
-    # Check for new test files
+    # Check for new test files using recursive paths. Nested test suites and
+    # duplicate basenames must not be confused with pre-existing top-level files.
     tests_dir = sandbox / "tests"
     if tests_dir.exists():
-        current_tests = {f.name for f in tests_dir.iterdir() if f.is_file()}
+        current_tests = {
+            f.relative_to(tests_dir).as_posix()
+            for f in tests_dir.rglob("*")
+            if f.is_file()
+        }
         new_tests = current_tests - pre_existing_tests
+
         if new_tests:
             return False  # Reviewer wrote a test — good
 
@@ -389,8 +437,59 @@ def _check_reviewer_wrote_test(
     return True
 
 
+def _validate_reviewer_counterexample(
+    sandbox: Path,
+    pre_existing_tests: set[str],
+    reviewer_text: str,
+) -> tuple[bool, str]:
+    """Require an ISSUE_FOUND critique to produce an executed failing test.
+
+    A newly created file is not sufficient evidence: it may be skipped by
+    pytest, pass, fail during collection, or target the wrong path. The
+    Reviewer contract is satisfied only when ``run_candidate_test`` executes
+    the new file and pytest reports at least one failed test.
+    """
+    if _parse_verdict(reviewer_text) != ReviewerVerdict.ISSUE_FOUND:
+        return True, "not_required"
+
+    tests_dir = sandbox / "tests"
+    if not tests_dir.exists():
+        metrics.reviewer_evidence_rejected.inc()
+        return False, "tests_directory_missing"
+
+    new_files = sorted(
+        path
+        for path in tests_dir.rglob("*")
+        if path.is_file()
+        and path.relative_to(tests_dir).as_posix() not in pre_existing_tests
+    )
+    if not new_files:
+        metrics.reviewer_evidence_rejected.inc()
+        return False, "counterexample_not_written"
+
+    for path in new_files:
+        filename = path.relative_to(tests_dir).as_posix()
+        result = run_candidate_test(str(sandbox), filename)
+        detail = str(result.get("detail", ""))
+        detail_lower = detail.lower()
+        executed_failure = (
+            not bool(result.get("passed"))
+            and re.search(r"\b\d+\s+failed\b", detail_lower) is not None
+            and "no tests ran" not in detail_lower
+            and "file not found" not in detail_lower
+            and "error collecting" not in detail_lower
+        )
+        if executed_failure:
+            metrics.reviewer_counterexamples_confirmed.inc()
+            return True, filename
+
+    metrics.reviewer_evidence_rejected.inc()
+    return False, "counterexample_did_not_execute_and_fail"
+
+
 # ---------------------------------------------------------------------------
 # Persistence helpers
+
 # ---------------------------------------------------------------------------
 
 # Real, unresolved-until-now finding from live end-to-end testing (see
@@ -434,8 +533,9 @@ async def _persist_with_timeout(
             asyncio.to_thread(fn, *args, **kwargs), timeout=timeout
         )
         return True
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error(
+
             "persist_call_timed_out",
             function=getattr(fn, "__name__", repr(fn)),
             timeout_seconds=timeout,
@@ -487,7 +587,7 @@ def _persist_session_start(
             session.ticket = ticket  # type: ignore[assignment]
             if tenant_id is not None:
                 session.tenant_id = tenant_id  # type: ignore[assignment]
-            session.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+            session.updated_at = datetime.now(UTC)  # type: ignore[assignment]
         else:
             session = DebateSession(
                 id=debate_id,
@@ -554,7 +654,7 @@ def _persist_session_end(
             session.error_message = error_message  # type: ignore[assignment]
             session.reviewer_verdict = reviewer_verdict  # type: ignore[assignment]
             session.needs_human_review = needs_human_review  # type: ignore[assignment]
-            session.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+            session.updated_at = datetime.now(UTC)  # type: ignore[assignment]
     logger.info(
         "debate_session_completed",
         debate_id=debate_id,
@@ -698,7 +798,7 @@ async def _run_debate_inner(
     tests_dir = sandbox / "tests"
     pre_existing_tests: set[str] = set()
     if tests_dir.exists():
-        pre_existing_tests = {f.name for f in tests_dir.iterdir() if f.is_file()}
+        pre_existing_tests = {f.relative_to(tests_dir).as_posix() for f in tests_dir.rglob("*") if f.is_file()}
 
     # -- Helper: build and call the Reviewer for a given round -----------
 
@@ -726,7 +826,23 @@ async def _run_debate_inner(
         # Repo-context retrieval — re-read from the live sandbox every
         # round so it always reflects the current patch.
         try:
-            repo_ctx = retrieve_repo_context(str(sandbox), target_file, code)
+            repo_ctx = retrieve_repo_context(
+                str(sandbox),
+                target_file,
+                code,
+                history_repo_dir=repo_dir,
+            )
+            call_graph = repo_ctx.get("call_graph", {})
+            metrics.repo_context_signals.inc(
+                "callers_present" if call_graph.get("callers") else "callers_empty"
+            )
+            metrics.repo_context_signals.inc(
+                "prior_fixes_present" if repo_ctx.get("prior_fixes") else "prior_fixes_empty"
+            )
+            metrics.repo_context_signals.inc(
+                "tests_present" if repo_ctx.get("test_conventions") else "tests_empty"
+            )
+
         except Exception as e:
             logger.warning(
                 "repo_context_retrieval_failed",
@@ -837,7 +953,23 @@ async def _run_debate_inner(
         sandbox, pre_existing_tests, reviewer_text
     )
 
+    counterexample_ok, evidence_reason = _validate_reviewer_counterexample(
+        sandbox, pre_existing_tests, reviewer_text
+    )
+    if verdict == ReviewerVerdict.ISSUE_FOUND and not counterexample_ok:
+        logger.warning(
+            "reviewer_issue_without_executable_evidence",
+            debate_id=debate_id,
+            evidence_reason=evidence_reason,
+        )
+        skipped_counterexample = True
+        verdict = ReviewerVerdict.INCONCLUSIVE
+        result.needs_human_review = True
+
+    metrics.reviewer_verdicts.inc(verdict.value)
+
     # Record the initial review as round 0 (Reviewer-only, no patch)
+
     initial_round = RoundLog(
         round_num=0,
         patch_text="",  # No Patcher ran yet
@@ -1034,7 +1166,7 @@ async def _run_debate_inner(
 
         # Update pre_existing_tests for counterexample detection
         if tests_dir.exists():
-            pre_existing_tests = {f.name for f in tests_dir.iterdir() if f.is_file()}
+            pre_existing_tests = {f.relative_to(tests_dir).as_posix() for f in tests_dir.rglob("*") if f.is_file()}
 
         try:
             reviewer_text, verdict, examples, repo_context = await _run_reviewer(
@@ -1065,8 +1197,24 @@ async def _run_debate_inner(
         skipped_counterexample = _check_reviewer_wrote_test(
             sandbox, pre_existing_tests, reviewer_text
         )
+        counterexample_ok, evidence_reason = _validate_reviewer_counterexample(
+            sandbox, pre_existing_tests, reviewer_text
+        )
+        if verdict == ReviewerVerdict.ISSUE_FOUND and not counterexample_ok:
+            logger.warning(
+                "reviewer_issue_without_executable_evidence",
+                debate_id=debate_id,
+                round_num=round_num,
+                evidence_reason=evidence_reason,
+            )
+            skipped_counterexample = True
+            verdict = ReviewerVerdict.INCONCLUSIVE
+            result.needs_human_review = True
+
+        metrics.reviewer_verdicts.inc(verdict.value)
 
         # Determine stop reason
+
         stop_reason = None
         if verdict == ReviewerVerdict.PASS:
             stop_reason = "reviewer_satisfied"
@@ -1075,8 +1223,10 @@ async def _run_debate_inner(
             result.needs_human_review = True
         elif round_num == settings.MAX_ROUNDS:
             stop_reason = "max_rounds_reached"
+            metrics.debates_max_rounds.inc()
 
         round_log = RoundLog(
+
             round_num=round_num,
             patch_text=patch_text,
             reviewer_text=reviewer_text,
@@ -1180,7 +1330,7 @@ def print_debate_summary(result: DebateResult) -> None:
         print("⚠ Flagged for human review (INCONCLUSIVE)")
     for r in result.rounds:
         if r.round_num == 0:
-            print(f"\n--- Initial Review (Round 0) ---")
+            print("\n--- Initial Review (Round 0) ---")
             print(f"Verdict: {r.reviewer_verdict}")
         else:
             print(f"\n--- Round {r.round_num} ---")
