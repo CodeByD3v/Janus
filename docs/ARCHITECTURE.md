@@ -547,10 +547,13 @@ validates the seams between them.
 The Janus 2.0 implementation, security hardening, GitHub App credential
 isolation, DNS-rebinding protection, gate baseline diffing, async lifecycle
 mitigation, admin dashboard, stricter Reviewer evidence enforcement, configurable
-calibration telemetry, multi-language regression fixtures, and an offline-
-rendered Kubernetes deployment path are implemented. The Kubernetes path has
-not been validated against a live cluster, and the curated fixtures are not a
-corpus-level benchmark. Three items must remain distinct:
+calibration telemetry, non-Python comment/string masking, manifest-driven corpus
+scaffolding, multi-language regression fixtures, and an offline-rendered
+Kubernetes deployment path are implemented. The Kubernetes path has not been
+validated against a live cluster, and the curated fixtures are not a corpus-level
+benchmark. Read-only calibration reporting and an opt-in signed GitHub webhook
+smoke harness are also available; neither claims external validation by itself.
+Three items must remain distinct:
 
 - **Async event-loop stall root cause — unresolved**: after a real failing LLM
   call sequence involving MCP, `_persist_session_end` was observed not to
@@ -558,7 +561,9 @@ corpus-level benchmark. Three items must remain distinct:
   event-loop-wide stall, but the underlying third-party MCP cause is not
   confirmed. The operational mitigation is active: persistence and blocking
   worker work use `asyncio.to_thread`, persistence has bounded timeouts, LLM
-  streams have deadlines, and MCP teardown is shielded and bounded.
+  streams have deadlines, and MCP teardown is shielded and bounded. The
+  reproduction script now records process state independently and can optionally
+  capture periodic py-spy snapshots; a persistent terminal is still required.
 - **Fine-tuning the Reviewer remains unstarted as a model-training operation.**
   `training/dataset.py` now implements a real integration boundary: records must
   carry repository/PR/review/commit provenance and executable before/after
@@ -570,7 +575,12 @@ corpus-level benchmark. Three items must remain distinct:
 
 The reproduction script and `py-spy` workflow in `Roadmap.md` remain available
 for diagnosis in a persistent terminal; the unresolved investigation must not
-be represented as a fully confirmed fix.
+be represented as a fully confirmed fix. For representative corpus work, use
+`core/corpus_eval.py` through `scripts/evaluate_repo_context_corpus.py` with an
+explicit manifest of local repositories. For observed-rate review, use
+`scripts/reviewer_calibration_report.py` against a saved `/metrics` snapshot.
+For GitHub validation, use `scripts/smoke_github_app.py` only with a real
+operator-approved endpoint, payload, and secret.
 
 ---
 

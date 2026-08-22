@@ -199,6 +199,72 @@ validation:
 
 If no `janus.yaml` exists, the current Python defaults are used automatically.
 
+### 4.7 Calibration from observed metrics
+
+Calibration is intentionally a reporting workflow, not automatic threshold
+mutation. Save a Prometheus snapshot and inspect the observed verdict,
+evidence, max-round, and repository-context rates:
+
+```bash
+curl http://localhost:8000/metrics > /tmp/janus-metrics.prom
+python scripts/reviewer_calibration_report.py /tmp/janus-metrics.prom
+```
+
+The report marks samples below its default minimum of 30 Reviewer verdicts as
+insufficient. Use `--minimum-sample-size` when a different review policy is
+appropriate, but do not change debate controls without representative
+production or replay data.
+
+### 4.8 Evaluate an explicit real-repository corpus
+
+The committed language fixtures are regression tests, not a corpus benchmark.
+For an operator-supplied local corpus, create a manifest such as:
+
+```json
+{
+  "repositories": [
+    {
+      "name": "service-a",
+      "path": "/data/repos/service-a",
+      "targets": [
+        {
+          "file": "src/service.ts",
+          "expected_symbols": ["calculateTotal"],
+          "expected_callers": ["src/consumer.ts"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Run it with:
+
+```bash
+python scripts/evaluate_repo_context_corpus.py /data/janus-corpus.json
+```
+
+The evaluator never clones repositories or invents expected results; the
+manifest must point to local checkouts and explicitly define expectations.
+
+### 4.9 Opt-in live GitHub webhook smoke test
+
+`evals/eval_github_app.py` remains mocked unit coverage. When a real GitHub App,
+public Janus endpoint, webhook secret, and captured event payload are
+available, an operator may send one signed smoke request:
+
+```bash
+export GITHUB_WEBHOOK_SECRET='read-from-your-secret-manager'
+python scripts/smoke_github_app.py \
+  https://janus.example.com/github/webhook \
+  /secure/path/captured-pull-request.json \
+  --event pull_request --confirm-live
+```
+
+The command refuses to send without `--confirm-live`, validates JSON locally,
+and does not print the secret or full payload. It is not run in CI or this
+sandbox by default.
+
 ---
 
 ## 5. Testing
@@ -264,6 +330,9 @@ cluster rollout.
 | `eval_path_safety.py` | `repo_ref` allowlist, `target_file` denylist | No | No |
 | `eval_storage_db.py` | Zombie-session sweeper | No | No |
 | `eval_reviewer.py` | Full debate loop, real LLM calls | No | **Yes, a real one** |
+| `eval_calibration.py` | Prometheus parser and read-only calibration report | No | No |
+| `eval_corpus.py` | Curated multi-language fixtures and manifest evaluator | No | No |
+| `eval_open_item_harnesses.py` | GitHub smoke signature/refusal behavior | No | No |
 
 **Known fragility, not a Janus bug**: `eval_llm_client.py::test_keyed_gemini_binds_the_given_key`
 depends on `google.adk.models.Gemini` having a private attribute
@@ -302,8 +371,11 @@ python -m py_compile $(find . -name "*.py" ! -path "*/packages/*")
 
 ### 6.1 CI (`.github/workflows/ci.yml`)
 
-Lint, type check, and the eight non-integration eval files run on every
-PR. `eval_reviewer.py` runs only if a `GOOGLE_API_KEY` secret is
+Lint, type check, and every discovered non-integration `evals/eval_*.py`
+module run on every PR.
+
+`eval_reviewer.py` runs only if a `GOOGLE_API_KEY` secret is
+
 configured on the repo — gated correctly via `secrets.GOOGLE_API_KEY` in
 the step's `if:` condition (a step's own `env:` block is *not* visible to
 that same step's `if:` — this was a real, since-fixed bug in an earlier
@@ -383,6 +455,9 @@ Optional richer trace (off by default, safe to leave off for normal use):
 
 ```bash
 export DIAGNOSTIC_PERSIST_TRACE=true
+export DIAGNOSTIC_WATCHDOG_LOG=/tmp/janus_persist_watchdog.log
+# Optional: append py-spy snapshots when permissions and py-spy are available.
+export PYSPY_AUTO_DUMP=true
 ```
 
 Writes raw, synchronous, `fsync`'d trace lines to `/tmp/janus_persist_trace.log`

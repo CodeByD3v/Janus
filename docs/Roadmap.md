@@ -22,11 +22,15 @@ navigation, not as stable anchors.
 | Gate check scoping (lint/type/security → target_file) | Built, verified |
 | Reviewer counterexample execution (`run_candidate_test`) | Built, verified; `ISSUE_FOUND` fails closed without an executed failing test |
 | Debate controls and calibration telemetry | Built, verified; configurable and observable, not auto-tuned |
+| Calibration report utility | Built, verified; read-only rates from saved Prometheus snapshots |
 | Behavioral retrieval | Built, verified; 25-example seed remains immature |
-| Repository-context retrieval | Built, verified; Python AST matching plus conservative non-Python fallback |
+| Repository-context retrieval | Built, verified; Python AST matching plus masked conservative non-Python fallback |
+| Repository-context corpus evaluator | Built, verified; explicit local-repository manifest required |
 | Multi-language regression fixtures | Built, verified; curated fixtures, not a real-repository corpus benchmark |
 | Kubernetes deployment path | Built and offline-rendered; live cluster/storage validation pending |
 | Reviewer training-data boundary | Built, verified; provider-neutral export, no model training |
+| Async-stall diagnostic harness | Built, verified; independent watchdog and optional py-spy snapshots; root cause unresolved |
+| GitHub App live smoke harness | Built, verified; explicitly opt-in, real endpoint required, not run in sandbox |
 | Multi-key LLM pooling | Built, verified |
 | Deploy pipeline (build → push → migrate → roll out → health-check) | Built, verified |
 | Notifications (PR comment, webhook) | Built, verified |
@@ -1209,6 +1213,25 @@ Redirects and environment proxies are disabled, so the request cannot escape
 the validated destination through either mechanism. Regression coverage proves
 that the transport receives the validated IP and does not perform a second
 hostname resolution.
+
+### Open-item hardening tooling — implemented
+The remaining open items now have executable local/operator-facing seams:
+
+- `core/repo_context.py` masks common comments and quoted literals before its
+  conservative non-Python regex fallback, while preserving fail-soft behavior.
+- `core/corpus_eval.py` and `scripts/evaluate_repo_context_corpus.py` evaluate
+  an explicit manifest of local repositories; no repositories are downloaded,
+  and no corpus-level result is claimed without supplied expectations.
+- `core/calibration.py` and `scripts/reviewer_calibration_report.py` summarize
+  observed Prometheus counters without changing `MAX_ROUNDS` or circuit-breaker
+  settings. Representative production or replay data is still required before
+  calibration decisions are made.
+- `scripts/reproduce_persist_hang.sh` records process state from an independent
+  watchdog and can optionally append periodic py-spy snapshots. This improves
+  evidence collection but does not identify the third-party MCP root cause.
+- `scripts/smoke_github_app.py` sends one signed payload only after an explicit
+  `--confirm-live` acknowledgement and operator-supplied endpoint, payload, and
+  secret. It has not been run against a real App in this environment.
 
 ### Live GitHub App end-to-end validation — pending infrastructure
 The GitHub App implementation and its unit/regression tests are complete, but

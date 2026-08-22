@@ -51,7 +51,13 @@
 #      log timing — py-spy gets it directly.
 #   5. Also check: is the worker process's CPU usage (`top`/`ps`) near 0%
 #      (genuinely blocked/waiting) or pegged at 100% (spinning)? These
-#      point to very different root causes.
+#      point to very different root causes. The script now records this
+#      independently in $DIAGNOSTIC_WATCHDOG_LOG.
+#
+#   6. For unattended capture, set PYSPY_AUTO_DUMP=true. If py-spy is
+#      installed and ptrace permissions allow it, the watchdog appends a
+#      main-process snapshot on each interval. This is evidence collection,
+#      not a substitute for interpreting the trace or proving root cause.
 #
 # ── Optional: enable the raw diagnostic trace ───────────────────────────
 #   Set DIAGNOSTIC_PERSIST_TRACE=true (this script does, below) to also
@@ -88,6 +94,9 @@ export WORKER_POLL_INTERVAL="${WORKER_POLL_INTERVAL:-2}"
 export WORKER_MAX_CONCURRENT="${WORKER_MAX_CONCURRENT:-1}"
 export DIAGNOSTIC_PERSIST_TRACE="true"
 export DIAGNOSTIC_PERSIST_TRACE_PATH="${DIAGNOSTIC_PERSIST_TRACE_PATH:-/tmp/janus_persist_trace.log}"
+export DIAGNOSTIC_WATCHDOG_LOG="${DIAGNOSTIC_WATCHDOG_LOG:-/tmp/janus_persist_watchdog.log}"
+export WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-2}"
+export PYSPY_AUTO_DUMP="${PYSPY_AUTO_DUMP:-false}"
 
 REPO_REF="${1:-$ALLOWED_REPO_ROOTS}"
 TARGET_FILE="${2:-inventory.py}"
@@ -97,7 +106,7 @@ API_PORT="${API_PORT:-8123}"
 # 3-slash relative and 4-slash absolute sqlite:/// URL forms.
 DB_FILE_PATH="${DATABASE_URL#sqlite:///}"
 rm -f "$DB_FILE_PATH" 2>/dev/null || true
-rm -f "$DIAGNOSTIC_PERSIST_TRACE_PATH"
+rm -f "$DIAGNOSTIC_PERSIST_TRACE_PATH" "$DIAGNOSTIC_WATCHDOG_LOG"
 
 echo "=== Starting API server on port $API_PORT ==="
 uvicorn api.app:app --host 127.0.0.1 --port "$API_PORT" &
@@ -129,7 +138,26 @@ python3 -m core.worker &
 WORKER_PID=$!
 echo ">>> WORKER PID: $WORKER_PID <<<"
 echo ">>> In another terminal, once the debate fails: py-spy dump --pid $WORKER_PID <<<"
+echo ">>> Watchdog log: $DIAGNOSTIC_WATCHDOG_LOG <<<"
 echo ""
+
+# Keep process-state capture outside the worker's event loop. This is useful
+# even when the worker stops servicing asyncio callbacks.
+watchdog() {
+  while kill -0 "$WORKER_PID" 2>/dev/null; do
+    {
+      printf '[%s] worker_pid=%s\\n' "$(date +%s.%N)" "$WORKER_PID"
+      ps -o pid,ppid,stat,pcpu,pmem,etime,cmd -p "$WORKER_PID" || true
+      if [ "$PYSPY_AUTO_DUMP" = "true" ] && command -v py-spy >/dev/null 2>&1; then
+        py-spy dump --pid "$WORKER_PID" --native || true
+      fi
+      echo "---"
+    } >> "$DIAGNOSTIC_WATCHDOG_LOG" 2>&1
+    sleep "$WATCHDOG_INTERVAL"
+  done
+}
+watchdog &
+WATCHDOG_PID=$!
 
 # Poll status until it reaches a terminal state, or indefinitely if you
 # Ctrl-C this script once you've captured what you need — the worker
@@ -156,9 +184,15 @@ with get_session() as db:
   sleep 5
 done
 
+kill "$WATCHDOG_PID" 2>/dev/null || true
+wait "$WATCHDOG_PID" 2>/dev/null || true
+
 echo ""
 echo "=== Diagnostic trace (if it captured anything) ==="
 cat "$DIAGNOSTIC_PERSIST_TRACE_PATH" 2>/dev/null || echo "(no trace file — DIAGNOSTIC_PERSIST_TRACE may not have taken effect)"
 
+echo ""
+echo "=== Process watchdog log ==="
+cat "$DIAGNOSTIC_WATCHDOG_LOG" 2>/dev/null || echo "(no watchdog log)"
 echo ""
 echo "Worker PID $WORKER_PID is still running — inspect it, then: kill $WORKER_PID"

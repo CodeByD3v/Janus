@@ -35,6 +35,11 @@ storage, a queue-based worker, and observable infrastructure.
   max-round termination
 - Curated Python/TypeScript/Go regression fixtures and offline-rendered Kubernetes
   manifests with an ordered migration release script
+- Manifest-driven repository-context evaluation for operator-supplied local
+  repositories, plus non-Python comment/string masking before regex fallback
+- Read-only calibration reports from Prometheus snapshots and an explicitly
+  confirmed GitHub webhook smoke-test harness; neither changes thresholds nor
+  contacts external services by default
 - Async lifecycle hardening: blocking persistence, gate, sandbox, and worker
   DB operations are offloaded; LLM deadlines and bounded MCP teardown mitigate
   the observed event-loop stall, whose third-party root cause remains unconfirmed
@@ -51,12 +56,14 @@ storage, a queue-based worker, and observable infrastructure.
 - The root cause of the observed async event-loop stall after a failing LLM/MCP
   sequence is not confirmed. Runtime mitigation is implemented through
   `asyncio.to_thread`, bounded persistence timeouts, LLM deadlines, and bounded
-  shielded MCP teardown. The persistent-terminal/`py-spy` diagnostic remains
-  optional follow-up work.
+  shielded MCP teardown. `scripts/reproduce_persist_hang.sh` now also records
+  independent process state and can optionally capture periodic py-spy dumps;
+  definitive diagnosis still requires a persistent terminal and ptrace access.
 - Live GitHub App end-to-end validation remains pending: it requires a real
   App registration, installation, public webhook endpoint, and test
-  repository. `evals/eval_github_app.py` currently verifies signatures,
-  trigger parsing, and file filtering with mocked GitHub calls only.
+  repository. `evals/eval_github_app.py` verifies signatures, trigger parsing,
+  and file filtering with mocked GitHub calls; `scripts/smoke_github_app.py`
+  provides a manually confirmed signed-payload smoke test but is not run here.
 - **Fine-tuning the Reviewer remains unstarted as a model-training operation.**
   `training/dataset.py` and `scripts/prepare_reviewer_dataset.py` provide a
   provider-neutral boundary that requires repository/PR/review/commit provenance
@@ -66,6 +73,11 @@ storage, a queue-based worker, and observable infrastructure.
   retrieval/context signals are validated across more repositories.
 - The Kubernetes bundle is render-tested offline but has not been validated
   against a live cluster, storage class, node pool, or public ingress.
+- Calibration is now reportable from observed telemetry through
+  `scripts/reviewer_calibration_report.py`, but thresholds remain operator-set
+  and are not auto-tuned without representative production or replay data.
+- The corpus evaluator accepts an explicit manifest of local real repositories,
+  but no external corpus is bundled or claimed as benchmark coverage.
 
 ---
 

@@ -50,6 +50,10 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 - **Deployment alternatives**: the established Docker Compose VM path plus an
   offline-rendered Kubernetes bundle with a dedicated Docker-socket worker and
   ordered migration release script.
+- **Open-item operational tooling**: read-only calibration reports from saved
+  Prometheus snapshots, manifest-driven evaluation over operator-supplied local
+  repositories, an independent async-stall watchdog, and an explicitly
+  confirmed signed GitHub webhook smoke test.
 
 **What is explicitly future work:**
 
@@ -61,9 +65,14 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
   [training/README.md](training/README.md) and [AGENTS.md](AGENTS.md).
 - **Live infrastructure validation remains pending.** The Kubernetes bundle
   has offline render and manifest regressions but no target cluster; GitHub App
-  end-to-end validation still needs a real App, public endpoint, and repository;
-  and the async MCP/event-loop root cause still needs persistent-terminal plus
-  `py-spy` diagnosis.
+  end-to-end validation still needs a real App, public endpoint, and repository.
+  The async MCP/event-loop root cause still needs persistent-terminal plus
+  `py-spy` diagnosis even though the reproduction script now records process
+  state independently and can automate optional snapshots.
+- **Calibration and corpus claims remain bounded.** Thresholds are not
+  auto-tuned, and the committed language fixtures are not a benchmark over real
+  repositories. Supply production/replay metrics and an explicit local corpus
+  manifest when making those evaluations.
 
 ---
 
@@ -81,7 +90,10 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 │   ├── github_materializer.py         Exact-commit PR repository snapshots
 │   ├── notifications.py               Webhook and GitHub outcome delivery
 │   ├── auto_merge.py                  Fail-closed optional PR auto-merge
-│   └── worker.py                      DB-polling queue consumer (atomic claiming)
+│   ├── worker.py                      DB-polling queue consumer (atomic claiming)
+│   ├── repo_context.py                Per-round repo signals and language fallbacks
+│   ├── calibration.py                 Read-only telemetry calibration summaries
+│   └── corpus_eval.py                 Manifest-driven local corpus evaluator
 │
 ├── api/
 │   ├── app.py                         FastAPI API + admin dashboard/listing
@@ -98,8 +110,13 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 │   └── ingest.py                      Batch ingestion CLI
 │
 ├── training/
-│   ├── dataset.py                     Provenance/evidence-gated SFT export
-│   └── README.md                      Fine-tuning boundary and data requirements
+│   ├── dataset.py                     Provenance/evidence-gated SFT export boundary
+│   └── README.md                      Training-data governance and limitations
+├── scripts/
+│   ├── reviewer_calibration_report.py Read-only metrics calibration report
+│   ├── evaluate_repo_context_corpus.py Manifest-driven corpus runner
+│   ├── smoke_github_app.py            Explicitly confirmed signed webhook smoke test
+│   └── reproduce_persist_hang.sh      Async-stall reproduction and watchdog
 │
 ├── k8s/
 │   ├── *.yaml                         Kubernetes alternative manifests

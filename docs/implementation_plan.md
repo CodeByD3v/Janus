@@ -38,13 +38,19 @@ The post-migration hardening work is also complete and regression-tested:
 - Admin visibility provides a fail-closed `ADMIN_API_KEYS` role tier, cross-tenant non-sensitive summaries through `GET /admin/debates`, and the `/admin` operator dashboard. Tenant and admin credentials are disjoint.
 - Queue claiming is atomic, zombie sessions are swept, per-round state is persisted, and structured logs and Prometheus metrics expose operational outcomes without logging secrets.
 - Reviewer evidence is fail-closed, debate controls validate safe bounds, and telemetry exposes verdicts, evidence, repository-context availability, and max-round caps for calibration.
+- `core/calibration.py` and `scripts/reviewer_calibration_report.py` provide read-only rate summaries from saved Prometheus snapshots; thresholds remain operator-set.
+- `core/corpus_eval.py` and `scripts/evaluate_repo_context_corpus.py` provide manifest-driven evaluation over operator-supplied local repositories without cloning or fabricating benchmark data.
+- Non-Python repository context masks common comments and quoted literals before conservative regex extraction, reducing obvious false caller edges without claiming compiler-grade resolution.
 - Curated Python/TypeScript/Go regression fixtures broaden local coverage without being represented as a real-repository benchmark.
 - `k8s/` provides an offline-rendered alternative with a dedicated Docker-socket worker, Docker CLI in the service image, explicit API gate isolation, immutable image wiring, and ordered `k8s/deploy.sh` migration rollout.
 - `training/dataset.py` and `scripts/prepare_reviewer_dataset.py` validate provenance/evidence-gated records and export provider-neutral JSONL; they do not train or upload a model.
+- `scripts/reproduce_persist_hang.sh` records process state outside the worker event loop and can optionally append periodic py-spy snapshots; the third-party root cause remains unresolved.
+- `scripts/smoke_github_app.py` provides an explicitly confirmed signed-payload smoke test for a real endpoint; it is not run without operator-supplied infrastructure and credentials.
 
 ## Verification record
 
-The complete evaluation command runs every `evals/eval_*.py` module. The final non-integration run completed with **254 passed, 3 skipped, 1 deselected integration test, and 4 warnings**. The previous baseline was 224 passed, 4 skipped, and 4 warnings. Skips and deselection are integration cases requiring real external credentials.
+The complete evaluation command runs every `evals/eval_*.py` module. The prior pushed baseline completed with **254 passed, 3 skipped, 1 deselected integration test, and 4 warnings**; this open-item batch is revalidated before its commit.
+Skips and deselection are integration cases requiring real external credentials.
 GitHub App coverage in `evals/eval_github_app.py` is unit/regression-level with mocked `_github_get` calls; a live installed-App webhook flow against a real repository and public endpoint has not yet been run. Kubernetes validation is offline rendering only. The Mermaid workflow in `JANUS_WORKFLOW.mmd` provides the corresponding end-to-end control-flow view.
 
 ## Deliberate future work

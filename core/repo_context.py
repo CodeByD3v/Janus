@@ -32,6 +32,71 @@ _SYMBOL_PATTERNS = (
 _CALL_PATTERN = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
 
 
+def _mask_non_python_source(code: str) -> str:
+    """Blank comments and string literals while preserving source positions.
+
+    Non-Python files still use lightweight regex extraction rather than a
+    compiler-grade parser, but masking common comments and quoted literals
+    prevents obvious false caller edges from documentation and examples.
+    Newlines are preserved so regex behavior remains stable across lines.
+    """
+    chars = list(code)
+    i = 0
+    quote: str | None = None
+    escaped = False
+    line_comment = False
+    block_comment = False
+    while i < len(chars):
+        current = chars[i]
+        if line_comment:
+            if current in "\r\n":
+                line_comment = False
+            else:
+                chars[i] = " "
+        elif block_comment:
+            if current == "*" and i + 1 < len(chars) and chars[i + 1] == "/":
+                chars[i] = chars[i + 1] = " "
+                i += 1
+                block_comment = False
+            elif current not in "\r\n":
+                chars[i] = " "
+        elif quote is not None:
+            if escaped:
+                if current not in "\r\n":
+                    chars[i] = " "
+                escaped = False
+            elif current == "\\\\":
+                chars[i] = " "
+                escaped = True
+            elif current == quote:
+                chars[i] = " "
+                quote = None
+            elif current not in "\r\n":
+                chars[i] = " "
+        elif current in "'\\\"`":
+            chars[i] = " "
+            quote = current
+        elif current == "/" and i + 1 < len(chars) and chars[i + 1] == "/":
+            chars[i] = chars[i + 1] = " "
+            i += 1
+            line_comment = True
+        elif current == "/" and i + 1 < len(chars) and chars[i + 1] == "*":
+            chars[i] = chars[i + 1] = " "
+            i += 1
+            block_comment = True
+        elif current == "#":
+            chars[i] = " "
+            line_comment = True
+        i += 1
+    return "".join(chars)
+
+
+def _non_python_symbol_usage(code: str) -> tuple[set[str], set[str]]:
+    """Return conservative definitions and calls from masked source text."""
+    masked = _mask_non_python_source(code)
+    return set(_regex_symbols(masked)), set(_CALL_PATTERN.findall(masked))
+
+
 def _run_git(args: list[str], cwd: Path, timeout: int | None = None) -> str:
     """Run a git command, returning empty output on any failure."""
     if timeout is None:
@@ -137,8 +202,7 @@ def _find_call_graph_neighbors(
         # be worse than an empty signal while the patch is invalid. Non-Python
         # targets use the conservative regex extractor.
         if not target_is_python:
-            defined_here.update(_regex_symbols(current_code))
-            called_names.update(_CALL_PATTERN.findall(current_code))
+            defined_here, called_names = _non_python_symbol_usage(current_code)
 
     callers: set[str] = set()
     if defined_here:
@@ -156,8 +220,9 @@ def _find_call_graph_neighbors(
                     continue
                 is_caller = bool(candidate_calls & defined_here)
             else:
+                masked_text = _mask_non_python_source(text)
                 is_caller = any(
-                    re.search(rf"\b{re.escape(name)}\s*\(", text)
+                    re.search(rf"\b{re.escape(name)}\s*\(", masked_text)
                     for name in defined_here
                 )
             if is_caller:
