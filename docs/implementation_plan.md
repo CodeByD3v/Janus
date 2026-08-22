@@ -44,7 +44,16 @@ The complete evaluation command runs every `evals/eval_*.py` module. The latest 
 
 ## Deliberate future work
 
-Reviewer fine-tuning remains deferred until the historical real-catch corpus and repository-context retrieval signals are substantially larger and better validated. Optional persistent-environment diagnosis of third-party MCP compatibility behavior may provide additional root-cause detail, but it is not a prerequisite for normal operation of the implemented Janus paths.
+**Fine-tuning the Reviewer is the one architecturally unstarted layer.**
+Repo-context retrieval, behavioral retrieval, and executable proof are built,
+but the behavioral store is still a 25-example seed set and repo-context
+retrieval is name-based scanning rather than mature static analysis. Revisit
+fine-tuning after the retrieval store grows substantially and repo-context
+signals are validated across more repositories, or after a real
+fine-tuning-shaped Reviewer failure is observed rather than hypothesized.
+Optional persistent-environment diagnosis of third-party MCP compatibility
+behavior may provide additional root-cause detail, but it is not a prerequisite
+for normal operation of the implemented Janus paths.
 
 ## Related documentation
 

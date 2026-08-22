@@ -50,8 +50,13 @@ storage, a queue-based worker, and observable infrastructure.
   App registration, installation, public webhook endpoint, and test
   repository. `evals/eval_github_app.py` currently verifies signatures,
   trigger parsing, and file filtering with mocked GitHub calls only.
-- Fine-tuning the Reviewer on a large mined dataset of PR comments that
-  historically preceded a real bug-fix commit remains deliberate product work.
+- **Fine-tuning the Reviewer is the one architecturally unstarted layer.**
+  Repo-context retrieval, behavioral retrieval, and executable proof are built;
+  fine-tuning remains deferred because the behavioral store is a 25-example
+  seed set and repo-context retrieval is name-based scanning rather than mature
+  static analysis. Revisit after the retrieval store grows substantially and
+  repo-context signals are validated across more repositories, or when a real
+  fine-tuning-shaped Reviewer failure is observed rather than hypothesized.
 
 ---
 

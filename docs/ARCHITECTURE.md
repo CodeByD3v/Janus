@@ -536,9 +536,13 @@ items must remain distinct:
   confirmed. The operational mitigation is active: persistence and blocking
   worker work use `asyncio.to_thread`, persistence has bounded timeouts, LLM
   streams have deadlines, and MCP teardown is shielded and bounded.
-- **Fine-tuning the Reviewer** remains deferred product work until the
-  behavioral retrieval corpus and repository-context signals are mature enough
-  to justify a learned-reviewer training effort.
+- **Fine-tuning the Reviewer is the one architecturally unstarted layer.**
+  Repo-context retrieval, behavioral retrieval, and executable proof are built;
+  fine-tuning remains deferred because the behavioral store is a 25-example
+  seed set and repo-context retrieval is name-based scanning rather than mature
+  static analysis. Revisit after the retrieval store grows substantially and
+  repo-context signals are validated across more repositories, or when a real
+  fine-tuning-shaped Reviewer failure is observed rather than hypothesized.
 
 The reproduction script and `py-spy` workflow in `Roadmap.md` remain available
 for diagnosis in a persistent terminal; the unresolved investigation must not

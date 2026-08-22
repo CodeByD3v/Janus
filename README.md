@@ -45,10 +45,14 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 
 **What is explicitly future work:**
 
-- Fine-tuning the Reviewer on a large mined dataset of PR review comments
-  that historically preceded a real bug-fix commit. The retrieval store is
-  the seam where that future dataset plugs in. See
-  [AGENTS.md](AGENTS.md) § Fine-Tuning Interface.
+- **Fine-tuning the Reviewer is the one architecturally unstarted layer.**
+  Repo-context retrieval, behavioral retrieval, and executable proof are built,
+  but the behavioral store is still a 25-example seed set and repo-context
+  retrieval is name-based scanning rather than mature static analysis. The
+  effort should be revisited after the retrieval store grows substantially and
+  repo-context signals are validated across more repositories, or after a real
+  fine-tuning-shaped Reviewer failure is observed. See [AGENTS.md](AGENTS.md)
+  § Fine-Tuning Interface.
 
 ---
 
