@@ -139,6 +139,7 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 ├── docker/sandbox.Dockerfile          Locked-down gate-execution image
 ├── docker-compose.yml                 Local dev stack (builds from source)
 ├── docker-compose.prod.yml            Production stack (pulls CI-built images, GAP 16)
+├── .env.example                       Secret-free runtime configuration template
 ├── .github/workflows/                 CI (lint/type/evals) and deploy (build/push/migrate/roll out)
 └── AGENTS.md                          Full operational reference
 
@@ -162,10 +163,10 @@ deliberately weak. That gap is exactly what the Reviewer agent closes.
 ### Local development (builds images from source)
 
 ```bash
-# 1. Set secrets
-echo "GOOGLE_API_KEY=your-gemini-key" > .env
-echo "API_KEYS=your-api-key:your-tenant-id" >> .env
-echo "ALLOWED_REPO_ROOTS=$(pwd)" >> .env
+# 1. Create the ignored local environment file, then edit its placeholders
+cp .env.example .env
+# Set ALLOWED_REPO_ROOTS to the absolute path for repositories under review.
+# Add a real LLM key and tenant API key in .env; never commit that file.
 
 # 2. Build the sandbox image
 docker compose --profile build build sandbox-builder
