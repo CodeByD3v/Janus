@@ -56,6 +56,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -99,20 +100,41 @@ def _is_docker_available() -> bool:
         return False
 
 
+def _resolve_tool_cmd(cmd: list[str]) -> list[str]:
+    """Resolve command binary from system PATH or the active virtual environment.
+
+    On Windows, when running from a venv, binaries like ruff.exe, pytest.exe,
+    mypy.exe live in sys.prefix/Scripts. If the parent environment did not
+    inherit PATH, searching sys.prefix ensures tools are found without failing.
+    """
+    if not cmd:
+        return cmd
+    tool = cmd[0]
+    if shutil.which(tool):
+        return cmd
+    scripts_dir = Path(sys.prefix) / ("Scripts" if sys.platform == "win32" else "bin")
+    candidate = scripts_dir / (tool + (".exe" if sys.platform == "win32" else ""))
+    if candidate.exists():
+        return [str(candidate)] + cmd[1:]
+    return cmd
+
+
 def _run_direct(cmd: list[str], cwd: Path, timeout: int = 60) -> tuple[int, str]:
     """Execute a command directly via subprocess (fallback mode)."""
+    resolved_cmd = _resolve_tool_cmd(cmd)
     try:
         proc = subprocess.run(
-            cmd,
+            resolved_cmd,
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
         output = (proc.stdout or "") + (proc.stderr or "")
         return proc.returncode, output.strip()
     except subprocess.TimeoutExpired:
-        return 1, f"TIMEOUT after {timeout}s running: {' '.join(cmd)}"
+        return 1, f"TIMEOUT after {timeout}s running: {' '.join(resolved_cmd)}"
     except FileNotFoundError as e:
         return 1, f"TOOL NOT FOUND: {e}"
 
@@ -414,7 +436,7 @@ def run_tests(repo_dir: str) -> dict:
                 "sandbox_copy(), not an arbitrary filesystem path."
             ),
         }
-    code, out = _run(["pytest", "-q"], cwd=Path(repo_dir))
+    code, out = _run(["pytest", "-o", "pythonpath=.", "-q"], cwd=Path(repo_dir))
     return {
         "check": "tests",
         "passed": code == 0,
@@ -659,7 +681,10 @@ def run_candidate_test(repo_dir: str, filename: str) -> dict:
     # Path relative to repo_dir, since _run's cwd is repo_dir — pytest
     # needs the file argument relative to (or resolvable from) that cwd.
     relative_path = target.relative_to(Path(repo_dir).resolve())
-    code, out = _run(["pytest", str(relative_path), "-q"], cwd=Path(repo_dir))
+    code, out = _run(
+        ["pytest", str(relative_path), "-o", "pythonpath=.", "-q"],
+        cwd=Path(repo_dir),
+    )
     return {
         "check": "candidate_test",
         "passed": code == 0,
