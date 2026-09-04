@@ -18,6 +18,13 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 # ---------------------------------------------------------------------------
 # Model configuration for BYOK (Bring-Your-Own-Key) — Phase 5
 # ---------------------------------------------------------------------------

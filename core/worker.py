@@ -110,10 +110,14 @@ class Worker:
             zombie_sweep_interval_seconds=settings.ZOMBIE_SWEEP_INTERVAL_SECONDS,
         )
 
-        # Register signal handlers
+        # Register signal handlers (on Windows, add_signal_handler is not implemented)
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._handle_shutdown)
+            try:
+                loop.add_signal_handler(sig, self._handle_shutdown)
+            except NotImplementedError:
+                logger.info("worker_signal_handlers_unavailable", platform="windows")
+                break
 
         while self.running:
             try:
@@ -298,6 +302,8 @@ class Worker:
                     webhook_url=webhook_url,
                     installation_id=github_installation_id,
                     tenant_id=tenant_id,
+                    commit_sha=commit_sha,
+                    needs_human_review=result.needs_human_review,
                 )
 
                 # Phase 7: Auto-merge if all conditions are met.

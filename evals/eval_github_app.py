@@ -47,3 +47,22 @@ def test_primary_target_file_skips_traversal_and_unsupported_files(monkeypatch):
     ]
     monkeypatch.setattr(github_app, "_github_get", lambda *args, **kwargs: files)
     assert github_app._get_primary_target_file("owner/repo", 7) == "src/review.ts"
+
+
+def test_janus_trigger_regex():
+    """Verify the flexible trigger regex matches all expected patterns."""
+    pat = github_app._JANUS_TRIGGER_RE
+    # Must match
+    assert pat.search("/janus review")
+    assert pat.search("/janus")
+    assert pat.search("@janus review")
+    assert pat.search("@janus")
+    assert pat.search("@Janus review")          # case-insensitive
+    assert pat.search("@JANUS")
+    assert pat.search("@janus-code-reviewer")   # bot usernames with hyphens
+    assert pat.search("hey @janus review this")  # mid-sentence
+    assert pat.search("please /janus review")
+    # Must NOT match
+    assert not pat.search("janus review")        # no prefix
+    assert not pat.search("hello world")
+    assert not pat.search("#janus")              # wrong prefix

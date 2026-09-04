@@ -178,6 +178,83 @@ def format_debate_summary(
 
     return "\n".join(lines)
 
+def submit_github_pr_review(
+    pr_repo: str,
+    pr_number: int,
+    body: str,
+    event: str,
+    installation_id: int | None = None,
+    tenant_id: str | None = None,
+) -> bool:
+    """Submit a formal Pull Request Review via GitHub's Reviews API.
+
+    Uses ``POST /repos/{owner}/{repo}/pulls/{number}/reviews`` so that
+    the GitHub App appears in the **Reviewers** sidebar of the PR with
+    the appropriate approval icon.
+
+    ``event`` must be one of ``"APPROVE"``, ``"REQUEST_CHANGES"``, or
+    ``"COMMENT"``.
+
+    Never raises. Returns True on success, False on any failure.
+    """
+    try:
+        headers = github_headers(
+            installation_id,
+            tenant_id,
+            legacy_token=getattr(settings, "GITHUB_TOKEN", None),
+        )
+    except Exception:
+        logger.warning(
+            "github_review_credential_error",
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            exc_info=True,
+        )
+        return False
+    if headers is None:
+        logger.warning(
+            "github_review_skipped_no_credentials",
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+        )
+        return False
+
+    url = f"{settings.GITHUB_API_URL}/repos/{pr_repo}/pulls/{pr_number}/reviews"
+
+    try:
+        resp = requests.post(
+            url,
+            json={"body": body, "event": event},
+            headers=headers,
+            timeout=settings.NOTIFICATION_TIMEOUT_SECONDS,
+        )
+        if resp.status_code >= 300:
+            logger.warning(
+                "github_pr_review_failed",
+                pr_repo=pr_repo,
+                pr_number=pr_number,
+                status_code=resp.status_code,
+                response=resp.text[:500],
+            )
+            return False
+
+        logger.info(
+            "github_pr_review_submitted",
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            event=event,
+        )
+        return True
+
+    except requests.RequestException as e:
+        logger.warning(
+            "github_pr_review_error",
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            error=str(e),
+        )
+        return False
+
 
 def post_github_pr_comment(
     pr_repo: str,
@@ -189,9 +266,9 @@ def post_github_pr_comment(
 
     """Post `body` as a comment on the given PR.
 
-    Uses GitHub's Issues API (`/issues/{number}/comments`), which works
-    for both issues and PRs — see this module's docstring for why a
-    comment was chosen over a Check Run.
+    Uses GitHub's Issues API (``/issues/{number}/comments``), which works
+    for both issues and PRs.  This serves as a fallback when the formal
+    Pull Request Reviews API is not available or not desired.
 
     Never raises. Returns True on success, False on any failure
     (missing token, network error, non-2xx response) — the caller does
@@ -307,20 +384,21 @@ def notify_debate_outcome(
     webhook_url: str | None = None,
     installation_id: int | None = None,
     tenant_id: str | None = None,
+    commit_sha: str | None = None,
+    needs_human_review: bool = False,
 ) -> None:
 
-    """Fire both optional notification side effects for a completed debate.
+    """Fire optional notification side effects for a completed debate.
 
-    Both are independently optional:
-    - Posts a PR comment only if BOTH pr_repo and pr_number are set
-      (api/schemas.py's CreateDebateRequest already enforces they're
-      provided together or not at all, so this mirrors that contract).
-    - Posts a webhook only if webhook_url was passed, or
-      settings.DEFAULT_WEBHOOK_URL is configured as a fallback.
+    Side effects (all independently optional):
+    - Submits a formal Pull Request Review via the Reviews API so Janus
+      appears in the Reviewers sidebar (APPROVE / REQUEST_CHANGES / COMMENT).
+      Falls back to an issue comment if the review submission fails.
+    - Updates the commit status check if pr_repo and commit_sha are set.
+    - Posts a webhook if webhook_url was passed or DEFAULT_WEBHOOK_URL
+      is configured.
 
-    If neither is set, this function does nothing — a debate with no PR
-    reference and no webhook configured is unaffected by this feature
-    existing at all.
+    If neither PR reference nor webhook is set, this function is a no-op.
     """
     if not (pr_repo and pr_number) and not (webhook_url or settings.DEFAULT_WEBHOOK_URL):
         return
@@ -328,13 +406,48 @@ def notify_debate_outcome(
     summary = format_debate_summary(debate_id, merged, rounds, final_gate)
 
     if pr_repo and pr_number:
-        post_github_pr_comment(
+        # Determine the review verdict for the Reviews API.
+        if merged:
+            review_event = "APPROVE"
+        elif needs_human_review:
+            review_event = "COMMENT"
+        else:
+            review_event = "REQUEST_CHANGES"
+
+        # Try formal PR review first; fall back to plain comment.
+        review_posted = submit_github_pr_review(
             pr_repo,
             pr_number,
             summary,
+            event=review_event,
             installation_id=installation_id,
             tenant_id=tenant_id,
         )
+        if not review_posted:
+            post_github_pr_comment(
+                pr_repo,
+                pr_number,
+                summary,
+                installation_id=installation_id,
+                tenant_id=tenant_id,
+            )
+
+    if pr_repo and commit_sha:
+        try:
+            from api.github_app import post_commit_status
+
+            state = "success" if merged else "failure"
+            description = "Janus review passed" if merged else "Janus review found issues"
+            post_commit_status(
+                pr_repo=pr_repo,
+                commit_sha=commit_sha,
+                state=state,
+                description=description,
+                installation_id=installation_id,
+                tenant_id=tenant_id,
+            )
+        except Exception as exc:
+            logger.warning("github_commit_status_outcome_failed", error=str(exc))
 
     effective_webhook = webhook_url or settings.DEFAULT_WEBHOOK_URL
     if effective_webhook:

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sys
 from typing import Any
 
 from google.adk.agents import LlmAgent
@@ -49,6 +50,21 @@ from core.observability import get_logger
 logger = get_logger(__name__)
 
 
+def _escape_adk_template_literals(value: str) -> str:
+    """Keep braces from retrieved code from becoming ADK context variables.
+
+    ADK's instructions_utils extracts variable names using r'{+[^{}]*}+'
+    and strips leading/trailing braces. If the remaining string is a valid
+    Python identifier (e.g., '{username}'), ADK tries to look it up in
+    session state and crashes if missing.
+
+    Inserting a zero-width space after '{' and before '}' ensures
+    var_name.isidentifier() is False, causing ADK to leave it as literal text
+    without error.
+    """
+    return value.replace("{", "{\u200b").replace("}", "\u200b}")
+
+
 def _build_toolset(tool_filter: list[str]) -> MCPToolset:
     """Create an MCPToolset owned by one agent instance.
 
@@ -58,7 +74,7 @@ def _build_toolset(tool_filter: list[str]) -> MCPToolset:
     return MCPToolset(
         connection_params=StdioConnectionParams(
             server_params=StdioServerParameters(
-                command="python3",
+                command=sys.executable,
                 args=[settings.MCP_SERVER_SCRIPT],
             ),
             timeout=120,
@@ -260,8 +276,8 @@ def build_reviewer(
     debate. See llm_client.py's module docstring for why.
     """
     instruction = REVIEWER_INSTRUCTION_TEMPLATE.format(
-        retrieved_examples=retrieved_examples,
-        repo_context=repo_context,
+        retrieved_examples=_escape_adk_template_literals(retrieved_examples),
+        repo_context=_escape_adk_template_literals(repo_context),
         language=language,
     )
     if model_config is not None and not model_config.is_google:

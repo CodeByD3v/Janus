@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import re
 import uuid
 from typing import Any
 
@@ -28,6 +29,15 @@ from storage.models import DebateSession, GithubInstallation
 logger = get_logger(__name__)
 
 github_router = APIRouter(prefix="/github", tags=["github"])
+
+# Matches any of: /janus, /janus review, @janus, @janus review,
+# @janus-code-reviewer-test (or any @username containing 'janus'), etc.
+# Case-insensitive. The word "review" after the trigger is optional.
+_JANUS_TRIGGER_RE = re.compile(
+    r"(?:^|\s)(?:[/@])(?:janus\b[\w-]*)"    # /janus or @janus or @janus-bot-name
+    r"(?:\s+review)?",                        # optional " review" suffix
+    re.IGNORECASE,
+)
 
 SUPPORTED_EXTENSIONS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".java", ".kt", ".rb",
@@ -182,22 +192,41 @@ def _post_commit_status(
         logger.warning("github_commit_status_exception", error=str(exc))
 
 
-def _post_no_checks_required(
+def post_commit_status(
+    pr_repo: str,
+    commit_sha: str,
+    state: str,
+    description: str,
+    context: str = "Janus",
+    target_url: str | None = None,
+    installation_id: int | None = None,
+    tenant_id: str | None = None,
+) -> None:
+    """Post a commit status via GitHub's Statuses API."""
+    _post_commit_status(
+        pr_repo=pr_repo,
+        commit_sha=commit_sha,
+        state=state,
+        description=description,
+        context=context,
+        target_url=target_url,
+        installation_id=installation_id,
+        tenant_id=tenant_id,
+    )
+
+
+def _post_review_pending(
     pr_repo: str,
     commit_sha: str,
     installation_id: int | None = None,
     tenant_id: str | None = None,
 ) -> None:
-    """Post a 'success' commit status to signal no checks are required.
-
-    This allows PRs to satisfy branch-protection rules that require
-    status checks to pass, without actually running any checks.
-    """
+    """Post a 'pending' commit status to signal review is in progress."""
     _post_commit_status(
         pr_repo=pr_repo,
         commit_sha=commit_sha,
-        state="success",
-        description="No checks required",
+        state="pending",
+        description="Janus review in progress...",
         context="Janus",
         installation_id=installation_id,
         tenant_id=tenant_id,
@@ -301,7 +330,7 @@ async def github_webhook(
 
     if x_github_event == "issue_comment" and action == "created":
         comment_body = data.get("comment", {}).get("body", "")
-        if "/janus review" not in comment_body:
+        if not _JANUS_TRIGGER_RE.search(comment_body):
             return {"status": "ignored"}
         issue = data.get("issue", {})
         if "pull_request" not in issue:
@@ -394,5 +423,5 @@ async def github_webhook(
     )
     _post_ack_comment(pr_repo, pr_number, installation_id, tenant_id)
     if commit_sha:
-        _post_no_checks_required(pr_repo, commit_sha, installation_id, tenant_id)
+        _post_review_pending(pr_repo, commit_sha, installation_id, tenant_id)
     return {"status": "review_queued", "debate_id": debate_id}
