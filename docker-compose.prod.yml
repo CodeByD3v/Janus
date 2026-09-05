@@ -78,6 +78,14 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      # The worker touches /tmp/janus_worker_heartbeat every poll cycle.
+      # If the file is older than 60s, the event loop has stalled.
+      test: ["CMD-SHELL", "python -c \"import os,time,sys; st=os.stat('/tmp/janus_worker_heartbeat'); sys.exit(0 if time.time()-st.st_mtime<60 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
   # ── PostgreSQL ─────────────────────────────────────────────

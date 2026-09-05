@@ -241,9 +241,13 @@ def _ensure_aware_utc(dt: datetime | None) -> datetime | None:
     return dt
 
 
-def sweep_zombie_sessions(timeout_minutes: int) -> int:
+def sweep_zombie_sessions(
+    timeout_minutes: int,
+    queued_timeout_minutes: int | None = None,
+) -> dict[str, int]:
     """Find DebateSessions stuck in status='running' with no recent
-    activity and mark them 'error', freeing them from limbo.
+    activity and mark them 'error', freeing them from limbo.  Also
+    sweeps sessions stuck in status='queued' past a separate threshold.
 
     Fixes a real, verified gap: if a worker process is killed outright
     (OOM kill, SIGKILL, hardware failure) mid-debate, nothing in the
@@ -262,6 +266,11 @@ def sweep_zombie_sessions(timeout_minutes: int) -> int:
     long-running multi-round debate that just hasn't finished yet;
     checking both avoids that false positive.
 
+    Queued sessions are simpler: they have no rounds, so only
+    `created_at` matters.  A session stuck in 'queued' for more than
+    `queued_timeout_minutes` was enqueued while no worker was running
+    (or all workers crashed before claiming it).
+
     Deliberately marks swept sessions 'error' rather than resetting them
     back to 'queued' for automatic retry: a worker crash can be caused by
     something inherent to the debate itself (a pathological repo, a
@@ -271,13 +280,14 @@ def sweep_zombie_sessions(timeout_minutes: int) -> int:
     failure over silent infinite retry, consistent with how run_debate's
     own exception handling already marks failures this way.
 
-    Returns the number of sessions swept.
+    Returns a dict with 'swept_running' and 'swept_queued' counts.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)
-    swept = 0
+    running_cutoff = datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)
+    result = {"swept_running": 0, "swept_queued": 0}
 
     session = _SessionFactory()
     try:
+        # --- Sweep stuck 'running' sessions ---
         running = (
             session.query(DebateSession)
             .filter(DebateSession.status == "running")
@@ -297,7 +307,7 @@ def sweep_zombie_sessions(timeout_minutes: int) -> int:
             # possible (claim_queued_session always sets updated_at) but
             # treat it as immediately stale rather than crash or skip it
             # silently if it somehow occurs.
-            is_stale = last_activity is None or last_activity < cutoff
+            is_stale = last_activity is None or last_activity < running_cutoff
             if not is_stale:
                 continue
 
@@ -307,7 +317,7 @@ def sweep_zombie_sessions(timeout_minutes: int) -> int:
                 f"{timeout_minutes} minutes (worker likely crashed)."
             )
             debate.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
-            swept += 1
+            result["swept_running"] += 1
             logger.warning(
                 "zombie_session_swept",
                 debate_id=debate.id,
@@ -315,17 +325,54 @@ def sweep_zombie_sessions(timeout_minutes: int) -> int:
                 timeout_minutes=timeout_minutes,
             )
 
+        # --- Sweep stuck 'queued' sessions ---
+        if queued_timeout_minutes is not None and queued_timeout_minutes > 0:
+            queued_cutoff = datetime.now(timezone.utc) - timedelta(
+                minutes=queued_timeout_minutes
+            )
+            queued = (
+                session.query(DebateSession)
+                .filter(DebateSession.status == "queued")
+                .all()
+            )
+            for debate in queued:
+                created = _ensure_aware_utc(debate.created_at)
+                is_stale = created is None or created < queued_cutoff
+                if not is_stale:
+                    continue
+
+                debate.status = "error"  # type: ignore[assignment]
+                debate.error_message = (  # type: ignore[assignment]
+                    f"Swept by zombie-session sweeper: stuck in 'queued' for over "
+                    f"{queued_timeout_minutes} minutes (no worker claimed this session)."
+                )
+                debate.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+                result["swept_queued"] += 1
+                logger.warning(
+                    "queued_session_swept",
+                    debate_id=debate.id,
+                    pr_repo=debate.pr_repo,
+                    pr_number=debate.pr_number,
+                    created_at=created.isoformat() if created else None,
+                    queued_timeout_minutes=queued_timeout_minutes,
+                )
+
         session.commit()
     except Exception:
         session.rollback()
         logger.error("zombie_sweep_failed", exc_info=True)
-        return 0
+        return {"swept_running": 0, "swept_queued": 0}
     finally:
         session.close()
 
-    if swept:
-        logger.info("zombie_sweep_complete", swept_count=swept)
-    return swept
+    total = result["swept_running"] + result["swept_queued"]
+    if total:
+        logger.info(
+            "zombie_sweep_complete",
+            swept_running=result["swept_running"],
+            swept_queued=result["swept_queued"],
+        )
+    return result
 
 
 def get_engine():

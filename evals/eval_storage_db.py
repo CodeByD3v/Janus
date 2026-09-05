@@ -46,9 +46,9 @@ def _make_session(
             ticket="t",
             status=status,
         )
-        s.updated_at = datetime.now(timezone.utc) - timedelta(
-            minutes=updated_minutes_ago
-        )
+        ts = datetime.now(timezone.utc) - timedelta(minutes=updated_minutes_ago)
+        s.updated_at = ts
+        s.created_at = ts
         db.add(s)
     return session_id
 
@@ -80,8 +80,8 @@ def test_sweeps_a_genuine_zombie_with_no_rounds():
     ago, no rounds ever persisted (worker died before round 1), well past
     the timeout."""
     sid = _make_session("running", updated_minutes_ago=60)
-    swept = sweep_zombie_sessions(timeout_minutes=30)
-    assert swept >= 1
+    result = sweep_zombie_sessions(timeout_minutes=30)
+    assert result["swept_running"] >= 1
     assert _get_status(sid) == "error"
 
 
@@ -117,8 +117,8 @@ def test_sweeps_a_session_whose_rounds_are_also_stale():
     sid = _make_session("running", updated_minutes_ago=90)
     _add_round(sid, minutes_ago=90, round_num=1)
     _add_round(sid, minutes_ago=61, round_num=2)  # still past the 30min cutoff
-    swept = sweep_zombie_sessions(timeout_minutes=30)
-    assert swept >= 1
+    result = sweep_zombie_sessions(timeout_minutes=30)
+    assert result["swept_running"] >= 1
     assert _get_status(sid) == "error"
 
 
@@ -134,8 +134,8 @@ def test_error_message_explains_the_sweep():
 def test_sweeps_multiple_zombies_in_one_call():
     sid1 = _make_session("running", updated_minutes_ago=60)
     sid2 = _make_session("running", updated_minutes_ago=90)
-    swept = sweep_zombie_sessions(timeout_minutes=30)
-    assert swept >= 2
+    result = sweep_zombie_sessions(timeout_minutes=30)
+    assert result["swept_running"] >= 2
     assert _get_status(sid1) == "error"
     assert _get_status(sid2) == "error"
 
@@ -146,13 +146,45 @@ def test_no_running_sessions_is_a_safe_noop():
     (from earlier tests sharing this in-memory DB), then a second,
     immediate call has nothing left to find."""
     sweep_zombie_sessions(timeout_minutes=30)  # clear any pre-existing zombies
-    swept_again = sweep_zombie_sessions(timeout_minutes=30)
-    assert swept_again == 0
+    result = sweep_zombie_sessions(timeout_minutes=30)
+    assert result["swept_running"] == 0
+    assert result["swept_queued"] == 0
 
 
 def test_returns_the_correct_count():
     sweep_zombie_sessions(timeout_minutes=30)  # clear any pre-existing zombies
     sid = _make_session("running", updated_minutes_ago=999)
-    swept = sweep_zombie_sessions(timeout_minutes=30)
-    assert swept == 1
+    result = sweep_zombie_sessions(timeout_minutes=30)
+    assert result["swept_running"] == 1
     assert _get_status(sid) == "error"
+
+
+# ---------------------------------------------------------------------------
+# Queued-session sweep (Task 3)
+# ---------------------------------------------------------------------------
+
+def test_sweeps_stuck_queued_session():
+    """A session stuck in 'queued' past the queued timeout should be swept."""
+    sid = _make_session("queued", updated_minutes_ago=120)
+    result = sweep_zombie_sessions(timeout_minutes=30, queued_timeout_minutes=60)
+    assert result["swept_queued"] >= 1
+    assert _get_status(sid) == "error"
+    with get_session() as db:
+        s = db.query(DebateSession).filter_by(id=sid).first()
+        assert "queued" in s.error_message.lower()
+
+
+def test_does_not_sweep_recently_queued_session():
+    """A session queued moments ago should not be swept."""
+    sid = _make_session("queued", updated_minutes_ago=5)
+    result = sweep_zombie_sessions(timeout_minutes=30, queued_timeout_minutes=60)
+    assert _get_status(sid) == "queued"
+
+
+def test_queued_sweep_disabled_by_default():
+    """Without queued_timeout_minutes, queued sessions are untouched."""
+    sid = _make_session("queued", updated_minutes_ago=999)
+    result = sweep_zombie_sessions(timeout_minutes=30)
+    assert _get_status(sid) == "queued"
+    assert result["swept_queued"] == 0
+

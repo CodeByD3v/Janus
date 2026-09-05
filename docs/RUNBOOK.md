@@ -548,8 +548,10 @@ Open `/admin` for the operator dashboard. It displays only non-sensitive debate 
 |---|---|---|
 | `WORKER_POLL_INTERVAL` | `5` | seconds |
 | `WORKER_MAX_CONCURRENT` | `4` | |
-| `ZOMBIE_SESSION_TIMEOUT_MINUTES` | `30` | |
-| `ZOMBIE_SWEEP_INTERVAL_SECONDS` | `300` | |
+| `ZOMBIE_SESSION_TIMEOUT_MINUTES` | `30` | Sessions stuck in `running` past this are swept to `error` |
+| `QUEUED_SESSION_TIMEOUT_MINUTES` | `60` | Sessions stuck in `queued` past this are swept to `error` |
+| `ZOMBIE_SWEEP_INTERVAL_SECONDS` | `300` | How often both sweeps run |
+| `WORKER_HEARTBEAT_FILE` | `/tmp/janus_worker_heartbeat` | Touched every poll cycle; Docker/k8s probe reads mtime |
 
 ### Observability
 | Variable | Default | Notes |
@@ -580,8 +582,10 @@ Open `/admin` for the operator dashboard. It displays only non-sensitive debate 
 |---|---|---|
 | Every `POST /debates` returns 422 on `repo_ref` | `ALLOWED_REPO_ROOTS` unset or doesn't cover the path you sent | §3, §8 |
 | Every request returns 401 | `API_KEYS` unset, or the key you're sending doesn't match | §8 |
-| A debate stays `queued` forever | No worker running, or its `DATABASE_URL` doesn't match the API's | §4.3 |
-| A debate stays `running` forever | Check `GET /debates/{id}` for `error_message`; if the worker crashed, `sweep_zombie_sessions` recovers it within `ZOMBIE_SESSION_TIMEOUT_MINUTES` — or you've hit §7 | §7, `docs/Roadmap.md` §2 |
+| A debate stays `queued` forever | No worker running, or its `DATABASE_URL` doesn't match the API's. After `QUEUED_SESSION_TIMEOUT_MINUTES` (default 60), the sweep marks it `error` and posts a timeout comment on the PR. | §4.3, §8 |
+| A debate stays `running` forever | Check `GET /debates/{id}` for `error_message`; if the worker crashed, `sweep_zombie_sessions` recovers it within `ZOMBIE_SESSION_TIMEOUT_MINUTES` — or you've hit §7. The heartbeat-based healthcheck restarts stalled workers automatically in Docker/k8s. | §7, `docs/Roadmap.md` §2 |
+| Worker container keeps restarting | The heartbeat file (`/tmp/janus_worker_heartbeat`) is stale — the event loop is stalling. Enable `DIAGNOSTIC_PERSIST_TRACE=true` and capture the trace log before restart (see §9.1). | §7, §9.1 |
+| GitHub PR still shows "pending" after timeout | The sweep posts a timeout comment and sets commit status to `error`, but only if the worker is alive to run the sweep. If the worker itself is dead, restart it — on first boot it runs an immediate sweep. | §8 |
 | `mypy`/`ruff`/`bandit` "not found" errors from the gate | Running without Docker and without those tools installed locally | §4.3, or set `USE_CONTAINERIZED_GATE=true` with Docker running |
 | `eval_retrieval.py` fails on model download | No network access to huggingface.co (sandboxed CI runners, restricted networks) | One-time download, cached after; not a code bug |
 | Combined `pytest evals/` run collects 0 tests | Known pytest/`testpaths` interaction — always invoke files individually | §5.1 |
@@ -589,3 +593,39 @@ Open `/admin` for the operator dashboard. It displays only non-sensitive debate 
 | `eval_llm_client.py::test_keyed_gemini_binds_the_given_key` fails specifically | Possible `google-adk` package resolution drift — see §5.2's note before assuming a real regression | §5.2 |
 | `janus.yaml` validation checks failing | Commands in janus.yaml are incorrect or tools not installed | §4.6 |
 | Multi-provider model errors | ADK/LiteLLM compatibility issue, or invalid BYOK API key | §8 |
+
+### 9.1 Capturing diagnostic evidence before restarting a stalled worker
+
+When the worker stalls and you need to collect evidence before the
+container orchestrator restarts it:
+
+```bash
+# 1. Enable diagnostic tracing (set in .env BEFORE starting the worker)
+DIAGNOSTIC_PERSIST_TRACE=true
+DIAGNOSTIC_PERSIST_TRACE_PATH=/tmp/janus_persist_trace.log
+
+# 2. When the worker stalls, BEFORE restarting:
+
+# Check the heartbeat file age
+stat /tmp/janus_worker_heartbeat   # mtime shows when the loop last ran
+
+# Copy the diagnostic trace
+cp /tmp/janus_persist_trace.log /path/to/safe/location/
+
+# Check DB for stuck sessions
+python -c "
+from storage.db import get_session
+from storage.models import DebateSession
+with get_session() as db:
+    for s in db.query(DebateSession).filter(
+        DebateSession.status.in_(['running', 'queued'])
+    ).all():
+        print(f'{s.id}  status={s.status}  updated={s.updated_at}')
+"
+
+# Optional: if py-spy is available and the worker PID is known
+py-spy dump --pid <WORKER_PID>
+
+# 3. Only THEN restart the worker — the first sweep cycle will clean up
+#    zombie/queued sessions and post timeout notifications on any PRs.
+```

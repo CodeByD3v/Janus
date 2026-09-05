@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,6 +77,41 @@ def _load_commit_sha(session_id: str) -> str | None:
         return session.commit_sha if session else None
 
 
+def _load_swept_pr_sessions(sweep_interval_seconds: int) -> list[dict[str, Any]]:
+    """Load recently-swept sessions that have PR metadata for notifications.
+
+    Returns sessions whose error_message starts with 'Swept by zombie'
+    and were updated within the last sweep interval, so notifications
+    fire exactly once per sweep cycle.
+    """
+    from datetime import timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=sweep_interval_seconds + 30)
+    results = []
+    with get_session() as db:
+        sessions = (
+            db.query(DebateSession)
+            .filter(
+                DebateSession.status == "error",
+                DebateSession.pr_repo.isnot(None),
+                DebateSession.pr_number.isnot(None),
+                DebateSession.error_message.like("Swept by zombie%"),
+                DebateSession.updated_at >= cutoff,
+            )
+            .all()
+        )
+        for s in sessions:
+            results.append({
+                "id": s.id,
+                "pr_repo": s.pr_repo,
+                "pr_number": s.pr_number,
+                "commit_sha": s.commit_sha,
+                "github_installation_id": s.github_installation_id,
+                "tenant_id": s.tenant_id,
+            })
+    return results
+
+
 class Worker:
     """Database-polling worker that runs adversarial code review debates.
 
@@ -93,6 +129,29 @@ class Worker:
         self._active_tasks: set[asyncio.Task[None]] = set()
         self._semaphore = asyncio.Semaphore(settings.WORKER_MAX_CONCURRENT)
         self._last_sweep_at: datetime | None = None
+        # Resolve heartbeat path: use the configured path, but on Windows
+        # fall back to a tempdir-based path since /tmp doesn't exist.
+        configured = settings.WORKER_HEARTBEAT_FILE
+        if sys.platform == "win32" and configured.startswith("/tmp/"):
+            configured = str(
+                Path(tempfile.gettempdir()) / configured.split("/tmp/", 1)[1]
+            )
+        self._heartbeat_path = Path(configured)
+
+    def _touch_heartbeat(self) -> None:
+        """Touch the heartbeat file to prove the worker's poll loop is alive.
+
+        This is the signal Docker healthcheck and k8s livenessProbe read.
+        If the worker's event loop stalls (the exact failure mode observed
+        in the live test), the file's mtime goes stale, and the
+        orchestrator restarts the container.
+        """
+        try:
+            self._heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+            self._heartbeat_path.touch()
+        except OSError:
+            # Non-fatal: heartbeat is a liveness signal, not critical data.
+            logger.warning("worker_heartbeat_touch_failed", path=str(self._heartbeat_path))
 
     async def start(self) -> None:
         """Main worker loop. Polls for queued sessions and dispatches debates."""
@@ -137,6 +196,9 @@ class Worker:
                         error=str(t.exception()),
                     )
 
+            # Touch heartbeat file to prove the poll loop is alive.
+            self._touch_heartbeat()
+
             await asyncio.sleep(settings.WORKER_POLL_INTERVAL)
 
         # Wait for active debates to finish on shutdown
@@ -172,14 +234,80 @@ class Worker:
             return
 
         try:
-            await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 sweep_zombie_sessions,
                 settings.ZOMBIE_SESSION_TIMEOUT_MINUTES,
+                queued_timeout_minutes=settings.QUEUED_SESSION_TIMEOUT_MINUTES,
             )
+            total = result["swept_running"] + result["swept_queued"]
+            if total > 0:
+                # Fire timeout notifications for swept sessions that
+                # have GitHub PR metadata, so developers see "Janus
+                # review timed out" instead of a perpetual 'pending'.
+                await self._notify_swept_sessions()
         except Exception:
             logger.error("zombie_sweep_error", exc_info=True)
         finally:
             self._last_sweep_at = now
+
+    async def _notify_swept_sessions(self) -> None:
+        """Post timeout notifications for recently-swept sessions.
+
+        Finds sessions whose error_message starts with 'Swept by zombie'
+        that have PR metadata, and posts a comment + failure status on
+        the PR so the developer knows the review timed out.  Only fires
+        for sessions swept in the current sweep (updated_at within the
+        last sweep interval).
+        """
+        try:
+            swept_sessions = await asyncio.to_thread(
+                _load_swept_pr_sessions,
+                settings.ZOMBIE_SWEEP_INTERVAL_SECONDS,
+            )
+            for s in swept_sessions:
+                logger.info(
+                    "notifying_swept_session",
+                    debate_id=s["id"],
+                    pr_repo=s["pr_repo"],
+                    pr_number=s["pr_number"],
+                )
+                from core.notifications import post_github_pr_comment
+
+                post_github_pr_comment(
+                    pr_repo=s["pr_repo"],
+                    pr_number=s["pr_number"],
+                    body=(
+                        "⏱️ **Janus review timed out.**\n\n"
+                        f"Debate `{s['id']}` did not complete within the "
+                        f"configured timeout. This is usually caused by a "
+                        f"worker crash or an API rate limit.\n\n"
+                        f"Please re-trigger the review with `@janus review` "
+                        f"or `/janus review`."
+                    ),
+                    installation_id=s.get("github_installation_id"),
+                    tenant_id=s.get("tenant_id"),
+                )
+                # Also update the commit status from 'pending' to 'error'
+                if s.get("commit_sha"):
+                    try:
+                        from api.github_app import post_commit_status
+
+                        post_commit_status(
+                            pr_repo=s["pr_repo"],
+                            commit_sha=s["commit_sha"],
+                            state="error",
+                            description="Janus review timed out",
+                            installation_id=s.get("github_installation_id"),
+                            tenant_id=s.get("tenant_id"),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "swept_session_status_update_failed",
+                            debate_id=s["id"],
+                            error=str(exc),
+                        )
+        except Exception:
+            logger.warning("swept_session_notifications_failed", exc_info=True)
 
     async def _poll_cycle(self) -> None:
         """Try to claim and start one debate."""

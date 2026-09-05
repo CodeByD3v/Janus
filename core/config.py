@@ -272,12 +272,29 @@ class Settings:
     ZOMBIE_SESSION_TIMEOUT_MINUTES: int = field(
         default_factory=lambda: _optional_int("ZOMBIE_SESSION_TIMEOUT_MINUTES", 30)
     )
+    # A DebateSession stuck in status='queued' for longer than this is
+    # assumed to have been enqueued while no worker was running (or all
+    # workers crashed), and is marked 'error'. Separate from the running-
+    # zombie timeout because the failure mode is different: the session
+    # was never claimed at all, not abandoned mid-execution.
+    QUEUED_SESSION_TIMEOUT_MINUTES: int = field(
+        default_factory=lambda: _optional_int("QUEUED_SESSION_TIMEOUT_MINUTES", 60)
+    )
     # How often the sweep runs, in seconds. Deliberately much less
     # frequent than WORKER_POLL_INTERVAL — this is a periodic
     # housekeeping pass over (usually zero) stuck sessions, not something
     # that needs to run every single poll cycle.
     ZOMBIE_SWEEP_INTERVAL_SECONDS: int = field(
         default_factory=lambda: _optional_int("ZOMBIE_SWEEP_INTERVAL_SECONDS", 300)
+    )
+    # Worker heartbeat file. The worker touches this file every poll
+    # cycle to prove liveness. Docker healthcheck and k8s livenessProbe
+    # check its mtime; if it's stale beyond a threshold the container
+    # orchestrator restarts the worker automatically.
+    WORKER_HEARTBEAT_FILE: str = field(
+        default_factory=lambda: _optional(
+            "WORKER_HEARTBEAT_FILE", "/tmp/janus_worker_heartbeat"
+        )
     )
 
     # --- Observability ---

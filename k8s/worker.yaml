@@ -142,10 +142,13 @@ spec:
               drop: ["ALL"]
           livenessProbe:
             exec:
-              command: ["sh", "-c", "python -c 'from storage.db import get_engine; get_engine().connect().close()'"]
-            initialDelaySeconds: 30
+              # Worker touches /tmp/janus_worker_heartbeat every poll cycle.
+              # If the file is older than 60s, the event loop has stalled.
+              command: ["python", "-c", "import os,time,sys; st=os.stat('/tmp/janus_worker_heartbeat'); sys.exit(0 if time.time()-st.st_mtime<60 else 1)"]
+            initialDelaySeconds: 60
             periodSeconds: 30
             timeoutSeconds: 10
+            failureThreshold: 3
           resources:
             requests:
               cpu: 500m
