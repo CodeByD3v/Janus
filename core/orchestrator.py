@@ -254,7 +254,7 @@ async def _ask(
     user_id: str,
     text: str,
     cost_tracker: CostTracker | None = None,
-    max_retries: int = 3,
+    max_retries: int = 5,
     key_index: int | None = None,
     rebuild_on_rate_limit: Callable[[], Awaitable[tuple[InMemoryRunner, str, int]]] | None = None,
 ) -> tuple[str, InMemoryRunner, str, int | None]:
