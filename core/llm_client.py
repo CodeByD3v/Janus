@@ -263,3 +263,30 @@ def is_rate_limit_error(exc: Exception) -> bool:
         or "quota" in message
         or "too many requests" in message
     )
+
+
+def extract_retry_delay(exc: Exception) -> float | None:
+    """Parse the server-recommended retry delay from a Google API error.
+
+    Google's 429 responses include a RetryInfo detail with the exact wait
+    time (e.g., ``'retryDelay': '21s'``).  The old retry logic ignored
+    this and used a fixed 1/2/4s exponential backoff, which burns through
+    all retry attempts in ~5 seconds on a free-tier key that has a
+    5-request-per-minute rate limit — the API says "wait 20s" but the
+    code retries in 1s.
+
+    Returns the delay in seconds, or None if it can't be parsed.
+    """
+    import re
+
+    message = str(exc)
+    # Match patterns like: 'retryDelay': '21s' or 'retryDelay': '21.765s'
+    # or "retry in 21.765380583s" or "Please retry in 21s"
+    match = re.search(r"(?:retryDelay['\"]?\s*:\s*['\"]?|retry in\s+)(\d+(?:\.\d+)?)s", message, re.IGNORECASE)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+    return None
+

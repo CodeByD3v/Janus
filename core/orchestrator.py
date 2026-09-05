@@ -54,7 +54,7 @@ from core.agents import build_patcher, build_reviewer, close_agent_toolsets
 from core.config import ModelConfig, settings
 from core.gate import run_candidate_test, run_full_gate, sandbox_copy
 from core.language import detect_language
-from core.llm_client import get_key_pool, is_rate_limit_error
+from core.llm_client import extract_retry_delay, get_key_pool, is_rate_limit_error
 from core.observability import CostTracker, LLMCallStats, get_logger, metrics
 from core.path_safety import validate_repo_ref
 from storage.db import get_session
@@ -341,7 +341,8 @@ async def _ask(
             metrics.llm_retries.inc()
 
             rotated = False
-            if key_index is not None and is_rate_limit_error(e):
+            rate_limited = is_rate_limit_error(e)
+            if key_index is not None and rate_limited:
                 get_key_pool().mark_rate_limited(key_index)
                 if rebuild_on_rate_limit is not None and attempt < max_retries:
                     runner, session_id, key_index = await rebuild_on_rate_limit()
@@ -356,12 +357,32 @@ async def _ask(
                 rotated_key=rotated,
                 key_index=key_index,
             )
-            if attempt < max_retries and not rotated:
-                # Only back off if we're retrying the SAME key — a fresh
-                # key from rotation has its own independent quota, so
-                # there's no reason to wait before trying it.
-                backoff = 2 ** (attempt - 1)  # 1s, 2s, 4s
-                await asyncio.sleep(backoff)
+
+            if attempt < max_retries:
+                if rate_limited:
+                    # Respect the API's recommended retry delay. On free-tier
+                    # keys (5 req/min), this is typically 15-25s. Without this,
+                    # the retry logic burns through all attempts in ~5s and the
+                    # debate fails unnecessarily.
+                    api_delay = extract_retry_delay(e)
+                    if api_delay is not None:
+                        backoff = min(api_delay + 1.0, 60.0)  # cap at 60s
+                    else:
+                        # Fallback: longer backoff for rate limits
+                        backoff = min(10 * (2 ** (attempt - 1)), 60.0)  # 10s, 20s, 40s
+                    logger.info(
+                        "llm_rate_limit_backoff",
+                        backoff_seconds=backoff,
+                        api_recommended=api_delay,
+                        attempt=attempt,
+                    )
+                elif not rotated:
+                    # Non-rate-limit error, use standard exponential backoff
+                    backoff = 2 ** (attempt - 1)  # 1s, 2s, 4s
+                else:
+                    backoff = 0  # Fresh key from rotation, no wait needed
+                if backoff > 0:
+                    await asyncio.sleep(backoff)
             if not _circuit_breaker.allow_request():
                 break
 
