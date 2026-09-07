@@ -236,7 +236,7 @@ def build_model_for_config(
 
     # Non-Google provider: use ADK's LiteLlm wrapper
     try:
-        from google.adk.models import LiteLlm
+        from google.adk.models.lite_llm import LiteLlm
     except ImportError as e:
         raise RuntimeError(
             f"LiteLlm is required for provider '{model_config.provider}' "
