@@ -232,12 +232,9 @@ def build_patcher(
     agent is bound to, so a 429 can be reported back to the pool via
     `llm_client.get_key_pool().mark_rate_limited(key_index)`.
     """
-    if model_config is not None and not model_config.is_google:
-        model, key_index = build_model_for_config(model_config)
-    else:
-        model, key_index = build_model(
-            model_config.effective_model(settings.MODEL) if model_config else settings.MODEL
-        )
+    model, key_index = build_model_for_config(
+        model_config or ModelConfig(),
+    )
     instruction = PATCHER_INSTRUCTION.format(language=language)
     agent = LlmAgent(
         model=model,
@@ -280,12 +277,9 @@ def build_reviewer(
         repo_context=_escape_adk_template_literals(repo_context),
         language=language,
     )
-    if model_config is not None and not model_config.is_google:
-        model, key_index = build_model_for_config(model_config)
-    else:
-        model, key_index = build_model(
-            model_config.effective_model(settings.MODEL) if model_config else settings.MODEL
-        )
+    model, key_index = build_model_for_config(
+        model_config or ModelConfig(),
+    )
     agent = LlmAgent(
         model=model,
         name="reviewer",
