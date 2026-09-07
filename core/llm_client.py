@@ -215,6 +215,21 @@ def build_model_for_config(
     effective_model = model_config.effective_model(
         default_model or settings.MODEL
     )
+    provider = model_config.provider
+
+    # Support specifying the provider directly in the model string
+    # e.g., ADV_REVIEW_MODEL="groq/llama-3.1-70b-versatile"
+    if provider == "google" and "/" in effective_model:
+        prefix, rest = effective_model.split("/", 1)
+        # Check against the allowed list of non-Google providers
+        if prefix in ("openai", "anthropic", "groq", "cohere", "nvidia"):
+            provider = prefix
+            effective_model = rest
+            model_config = ModelConfig(
+                provider=provider,
+                model=effective_model,
+                api_key=model_config.api_key
+            )
 
     if model_config.is_google:
         return build_model(effective_model)
