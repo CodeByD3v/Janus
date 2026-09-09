@@ -1154,7 +1154,7 @@ async def _run_debate_inner(
                 key_index=patcher_key_index,
                 rebuild_on_rate_limit=_rebuild_patcher,
             )
-            patcher_key_index = next_key_index
+            patcher_key_index = next_key_index  # type: ignore
         except RuntimeError as e:
             logger.error(
                 "debate_failed_patcher_fix",

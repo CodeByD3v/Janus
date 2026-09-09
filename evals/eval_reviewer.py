@@ -36,8 +36,8 @@ class TestFullDebate:
         - At least 1 round occurred
         - The final gate passed (merged=True)
         """
-        from storage.db import run_migrations
         from core.orchestrator import run_debate
+        from storage.db import run_migrations
 
         run_migrations()
 

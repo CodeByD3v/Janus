@@ -8,9 +8,7 @@ across simulated restarts, and upsert idempotency. No API key needed.
 from __future__ import annotations
 
 import json
-import shutil
 import sys
-import tempfile
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -21,8 +19,8 @@ from pydantic import ValidationError
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.config import settings as real_settings  # noqa: E402
-from retrieval_pipeline.schema import RealCatchExample, validate_record  # noqa: E402
+from core.config import settings as real_settings
+from retrieval_pipeline.schema import RealCatchExample, validate_record
 
 
 def _settings_with(**overrides):
@@ -166,7 +164,7 @@ class TestRetrievalStore:
         monkeypatch.setattr(
             retrieval, "settings", replace(retrieval.settings, SEED_DATA_PATH=str(seed_jsonl))
         )
-        from core.retrieval import initialize_store, _get_collection
+        from core.retrieval import _get_collection, initialize_store
         initialize_store()
         collection = _get_collection()
         assert collection.count() == 3

@@ -10,13 +10,10 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.auto_merge import should_auto_merge, execute_auto_merge  # noqa: E402
-from core.repo_config import RepoConfig  # noqa: E402
-
+from core.auto_merge import execute_auto_merge, should_auto_merge
+from core.repo_config import RepoConfig
 
 # ---------------------------------------------------------------------------
 # should_auto_merge — policy checks
@@ -27,7 +24,7 @@ def _config(**overrides) -> RepoConfig:
     """Build a RepoConfig with auto_merge=True and optional overrides."""
     defaults = {"auto_merge": True}
     defaults.update(overrides)
-    return RepoConfig(**defaults)
+    return RepoConfig(**defaults)  # type: ignore
 
 
 def test_auto_merge_requires_opt_in():

@@ -18,8 +18,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Generator
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -145,7 +144,7 @@ def _sanitize_url(url: str) -> str:
     return url
 
 
-def claim_queued_session(worker_id: str) -> Optional[str]:
+def claim_queued_session(worker_id: str) -> str | None:
     """Atomically claim a queued DebateSession for processing.
 
     Uses an atomic UPDATE ... WHERE to prevent double-processing by
@@ -163,8 +162,8 @@ def claim_queued_session(worker_id: str) -> Optional[str]:
             # being queued. If another worker won the race, rowcount is zero.
             debate = (
                 session.query(DebateSession)
-                .filter(DebateSession.status == "queued")
-                .order_by(DebateSession.created_at)
+                .filter(DebateSession.status == "queued")  # type: ignore
+                .order_by(DebateSession.created_at)  # type: ignore
                 .first()
             )
             if debate is None:
@@ -173,13 +172,13 @@ def claim_queued_session(worker_id: str) -> Optional[str]:
             updated = (
                 session.query(DebateSession)
                 .filter(
-                    DebateSession.id == debate_id,
-                    DebateSession.status == "queued",
+                    DebateSession.id == debate_id,  # type: ignore
+                    DebateSession.status == "queued",  # type: ignore
                 )
                 .update(
                     {
                         DebateSession.status: "running",
-                        DebateSession.updated_at: datetime.now(timezone.utc),
+                        DebateSession.updated_at: datetime.now(UTC),  # type: ignore
                     },
                     synchronize_session=False,
                 )
@@ -237,7 +236,7 @@ def _ensure_aware_utc(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -282,7 +281,7 @@ def sweep_zombie_sessions(
 
     Returns a dict with 'swept_running' and 'swept_queued' counts.
     """
-    running_cutoff = datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)
+    running_cutoff = datetime.now(UTC) - timedelta(minutes=timeout_minutes)
     result = {"swept_running": 0, "swept_queued": 0}
 
     session = _SessionFactory()
@@ -290,7 +289,7 @@ def sweep_zombie_sessions(
         # --- Sweep stuck 'running' sessions ---
         running = (
             session.query(DebateSession)
-            .filter(DebateSession.status == "running")
+            .filter(DebateSession.status == "running")  # type: ignore
             .all()
         )
         for debate in running:
@@ -316,7 +315,7 @@ def sweep_zombie_sessions(
                 f"Swept by zombie-session sweeper: no activity for over "
                 f"{timeout_minutes} minutes (worker likely crashed)."
             )
-            debate.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+            debate.updated_at = datetime.now(UTC)  # type: ignore[assignment]
             result["swept_running"] += 1
             logger.warning(
                 "zombie_session_swept",
@@ -327,12 +326,12 @@ def sweep_zombie_sessions(
 
         # --- Sweep stuck 'queued' sessions ---
         if queued_timeout_minutes is not None and queued_timeout_minutes > 0:
-            queued_cutoff = datetime.now(timezone.utc) - timedelta(
+            queued_cutoff = datetime.now(UTC) - timedelta(
                 minutes=queued_timeout_minutes
             )
             queued = (
                 session.query(DebateSession)
-                .filter(DebateSession.status == "queued")
+                .filter(DebateSession.status == "queued")  # type: ignore
                 .all()
             )
             for debate in queued:
@@ -346,7 +345,7 @@ def sweep_zombie_sessions(
                     f"Swept by zombie-session sweeper: stuck in 'queued' for over "
                     f"{queued_timeout_minutes} minutes (no worker claimed this session)."
                 )
-                debate.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+                debate.updated_at = datetime.now(UTC)  # type: ignore[assignment]
                 result["swept_queued"] += 1
                 logger.warning(
                     "queued_session_swept",

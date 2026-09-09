@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from core.config import ModelConfig
+
 
 @dataclass
 class CheckConfig:
@@ -92,7 +94,7 @@ class RepoConfig:
             auto_merge_authors=[str(a) for a in auto_merge_authors],
         )
 
-    def to_model_config(self) -> "ModelConfig | None":
+    def to_model_config(self) -> ModelConfig | None:
         """Convert the repo's model settings to a ModelConfig, or None
         if no model override is specified.
 

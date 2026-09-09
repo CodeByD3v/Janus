@@ -14,10 +14,10 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.config import ModelConfig, SUPPORTED_PROVIDERS, settings
+from api.schemas import CreateDebateRequest
+from core.config import SUPPORTED_PROVIDERS, ModelConfig, settings
 from core.llm_client import build_model_for_config
 from core.repo_config import RepoConfig
-from api.schemas import CreateDebateRequest
 
 # ---------------------------------------------------------------------------
 # 1. ModelConfig dataclass
@@ -32,7 +32,7 @@ def test_model_config_defaults():
 def test_model_config_effective_model():
     config = ModelConfig(model="gpt-4o")
     assert config.effective_model("default-model") == "gpt-4o"
-    
+
     empty_config = ModelConfig()
     assert empty_config.effective_model("default-model") == "default-model"
 
@@ -61,7 +61,7 @@ def test_settings_byok_api_key_fallback_to_env():
     # Use dataclasses.replace to create a mock settings object
     mock_settings = dataclasses.replace(settings, OPENAI_API_KEY="server-openai-key")
     config = ModelConfig(provider="openai")
-    
+
     assert mock_settings.byok_api_key(config) == "server-openai-key"
 
 def test_settings_byok_api_key_unknown_provider():
@@ -76,50 +76,50 @@ def test_settings_byok_api_key_unknown_provider():
 def test_build_model_for_config_google(mock_build_model):
     mock_build_model.return_value = (MagicMock(), 0)
     config = ModelConfig(provider="google", model="gemini-2.5-flash")
-    
+
     model, index = build_model_for_config(config)
-    
+
     mock_build_model.assert_called_once_with("gemini-2.5-flash")
     assert index == 0
 
 def test_build_model_for_config_litellm_missing():
     config = ModelConfig(provider="openai", model="gpt-4o")
-    
+
     # Hide google.adk.models.lite_llm
-    with patch.dict(sys.modules, {"google.adk.models.lite_llm": None}):
+    with patch.dict(sys.modules, {"google.adk.models.lite_llm": None}):  # noqa: SIM117
         with pytest.raises(RuntimeError, match="LiteLlm is required for provider 'openai'"):
             build_model_for_config(config)
 
 def test_build_model_for_config_no_api_key(monkeypatch):
     config = ModelConfig(provider="openai", model="gpt-4o")
-    
+
     # Replace the frozen settings object rather than assigning to one of its
     # methods, which would fail during monkeypatch teardown.
     monkeypatch.setattr(
         "core.llm_client.settings",
         dataclasses.replace(settings, OPENAI_API_KEY=""),
     )
-    
+
     # Mock litellm to avoid import error
     mock_lite_llm_module = MagicMock()
     mock_lite_llm_module.LiteLlm = MagicMock()
-    with patch.dict(sys.modules, {"google.adk.models.lite_llm": mock_lite_llm_module}):
+    with patch.dict(sys.modules, {"google.adk.models.lite_llm": mock_lite_llm_module}):  # noqa: SIM117
         with pytest.raises(RuntimeError, match="No API key available for provider 'openai'"):
             build_model_for_config(config)
 
 def test_build_model_for_config_success():
     config = ModelConfig(provider="openai", model="gpt-4o", api_key="my-key")
-    
+
     # Mock Litellm
     mock_litellm_instance = MagicMock()
     mock_litellm_class = MagicMock(return_value=mock_litellm_instance)
-    
+
     mock_lite_llm_module = MagicMock()
     mock_lite_llm_module.LiteLlm = mock_litellm_class
-    
+
     with patch.dict(sys.modules, {"google.adk.models.lite_llm": mock_lite_llm_module}):
         model, index = build_model_for_config(config)
-        
+
         assert model is mock_litellm_instance
         assert index == -1
         mock_litellm_class.assert_called_once_with(model="openai/gpt-4o", api_key="my-key")
@@ -158,7 +158,7 @@ def test_repo_config_to_model_config_none():
 def test_repo_config_to_model_config_set():
     repo = RepoConfig(model_provider="openai", model_name="gpt-4o")
     config = repo.to_model_config()
-    
+
     assert config is not None
     assert config.provider == "openai"
     assert config.model == "gpt-4o"
@@ -171,7 +171,7 @@ model:
 """
     yaml_file = tmp_path / "janus.yaml"
     yaml_file.write_text(yaml_content)
-    
+
     repo = RepoConfig.from_yaml(yaml_file)
     assert repo.model_provider == "anthropic"
     assert repo.model_name == "claude-3-opus"

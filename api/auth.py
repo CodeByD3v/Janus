@@ -22,7 +22,6 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from fastapi import HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
@@ -73,14 +72,14 @@ class KeyStore:
             self._keys[key_hash] = _KeyMetadata(tenant_id=tenant_id, role=role)
         logger.info("api_key_registered", tenant_id=tenant_id, role=role)
 
-    def validate_key(self, raw_key: str) -> Optional[str]:
+    def validate_key(self, raw_key: str) -> str | None:
         """Validate a tenant key, excluding credentials with the admin role."""
         metadata = self._metadata_for(raw_key)
         if metadata is None or metadata.role != "tenant":
             return None
         return metadata.tenant_id
 
-    def validate_admin_key(self, raw_key: str) -> Optional[str]:
+    def validate_admin_key(self, raw_key: str) -> str | None:
         """Validate an admin key. Returns its operator id if authorized."""
         metadata = self._metadata_for(raw_key)
         if metadata is None or metadata.role != "admin":
@@ -202,7 +201,7 @@ rate_limiter = RateLimiter()
 
 async def require_api_key(
     request: Request,
-    api_key: Optional[str] = Security(_api_key_header),
+    api_key: str | None = Security(_api_key_header),
 ) -> str:
     """FastAPI dependency that validates the API key and rate limit.
 
@@ -227,7 +226,7 @@ async def require_api_key(
 
 async def require_admin_api_key(
     request: Request,
-    api_key: Optional[str] = Security(_api_key_header),
+    api_key: str | None = Security(_api_key_header),
 ) -> str:
     """Require a key explicitly registered with the admin role."""
     if not api_key:

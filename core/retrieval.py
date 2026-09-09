@@ -32,7 +32,7 @@ _embedder: SentenceTransformer | None = None
 
 def _get_embedder() -> SentenceTransformer:
     """Return (and cache) the sentence-transformer embedding model."""
-    global _embedder  # noqa: PLW0603
+    global _embedder
     if _embedder is None:
         logger.info("loading_embedding_model", model=settings.EMBEDDING_MODEL)
         _embedder = SentenceTransformer(settings.EMBEDDING_MODEL)
@@ -41,7 +41,7 @@ def _get_embedder() -> SentenceTransformer:
 
 def _get_collection() -> chromadb.Collection:
     """Return (and cache) the ChromaDB collection handle."""
-    global _chroma_client, _collection  # noqa: PLW0603
+    global _chroma_client, _collection
     if _collection is None:
         _chroma_client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
         _collection = _chroma_client.get_or_create_collection(
@@ -117,17 +117,17 @@ def retrieve_examples(
     ).tolist()
 
     results = collection.query(
-        query_embeddings=[query_embedding],
+        query_embeddings=[query_embedding],  # type: ignore
         n_results=min(top_k, collection.count()),
         include=["metadatas", "distances", "documents"],
     )
 
     examples: list[dict[str, Any]] = []
     ids: list[str] = results.get("ids", [[]])[0]
-    metadatas: list[dict[str, Any]] = results.get("metadatas", [[]])[0]
-    distances: list[float] = results.get("distances", [[]])[0]
+    metadatas: list[dict[str, Any]] = results.get("metadatas", [[]])[0]  # type: ignore
+    distances: list[float] = results.get("distances", [[]])[0]  # type: ignore
 
-    for record_id, meta, dist in zip(ids, metadatas, distances):
+    for record_id, meta, dist in zip(ids, metadatas, distances, strict=False):
         example: dict[str, Any] = {
             "id": record_id,
             "distance": dist,

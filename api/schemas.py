@@ -8,8 +8,7 @@ models. No raw dicts flow through the API layer.
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
@@ -50,53 +49,53 @@ class CreateDebateRequest(BaseModel):
         max_length=4096,
         description="Description of the bug or feature to fix",
     )
-    pr_repo: Optional[str] = Field(
+    pr_repo: str | None = Field(
         default=None,
         max_length=256,
         description="'owner/repo' — required together with pr_number to post a PR comment",
     )
-    pr_number: Optional[int] = Field(
+    pr_number: int | None = Field(
         default=None,
         gt=0,
         description="Pull request number — required together with pr_repo",
     )
-    commit_sha: Optional[str] = Field(
+    commit_sha: str | None = Field(
         default=None,
         max_length=64,
         description="Optional commit SHA the debate ran against, for reference only",
     )
-    pr_branch: Optional[str] = Field(
+    pr_branch: str | None = Field(
         default=None,
         max_length=256,
         description="Pull-request head branch used by auto-merge allowlists",
     )
-    pr_author: Optional[str] = Field(
+    pr_author: str | None = Field(
         default=None,
         max_length=256,
         description="Pull-request author used by auto-merge allowlists",
     )
-    github_installation_id: Optional[int] = Field(
+    github_installation_id: int | None = Field(
         default=None,
         gt=0,
         description="GitHub App installation owning this repository",
     )
-    webhook_url: Optional[str] = Field(
+    webhook_url: str | None = Field(
         default=None,
         max_length=2048,
         description="If set (or DEFAULT_WEBHOOK_URL is configured server-side), "
         "a JSON summary is POSTed here when the debate completes",
     )
-    model_provider: Optional[str] = Field(
+    model_provider: str | None = Field(
         default=None,
         max_length=32,
         description="LLM provider: 'google', 'openai', 'anthropic', 'groq', etc.",
     )
-    model_name: Optional[str] = Field(
+    model_name: str | None = Field(
         default=None,
         max_length=128,
         description="Model name within the provider (e.g. 'gpt-4o', 'claude-sonnet-4-20250514')",
     )
-    model_api_key: Optional[SecretStr] = Field(
+    model_api_key: SecretStr | None = Field(
         default=None,
         description="Optional BYOK key; encrypted before database persistence and never returned",
     )
@@ -132,20 +131,20 @@ class CreateDebateRequest(BaseModel):
 
     @field_validator("pr_repo")
     @classmethod
-    def _validate_pr_repo_format(cls, v: Optional[str]) -> Optional[str]:
+    def _validate_pr_repo_format(cls, v: str | None) -> str | None:
         if v is not None and not _PR_REPO_PATTERN.match(v):
             raise ValueError("pr_repo must look like 'owner/repo'")
         return v
 
     @field_validator("webhook_url")
     @classmethod
-    def _validate_webhook_scheme(cls, v: Optional[str]) -> Optional[str]:
+    def _validate_webhook_scheme(cls, v: str | None) -> str | None:
         if v is not None and not (v.startswith("http://") or v.startswith("https://")):
             raise ValueError("webhook_url must start with http:// or https://")
         return v
 
     @model_validator(mode="after")
-    def _pr_repo_and_number_together(self) -> "CreateDebateRequest":
+    def _pr_repo_and_number_together(self) -> CreateDebateRequest:
         if (self.pr_repo is None) != (self.pr_number is None):
             raise ValueError("pr_repo and pr_number must be provided together, or not at all")
         if self.model_api_key is not None:
@@ -157,7 +156,7 @@ class CreateDebateRequest(BaseModel):
 
     @field_validator("model_provider")
     @classmethod
-    def _validate_model_provider(cls, v: Optional[str]) -> Optional[str]:
+    def _validate_model_provider(cls, v: str | None) -> str | None:
         if v is not None:
             from core.config import SUPPORTED_PROVIDERS
             if v not in SUPPORTED_PROVIDERS:
@@ -189,14 +188,14 @@ class RoundResponse(BaseModel):
     round_num: int
     patch_text: str = ""
     reviewer_text: str = ""
-    gate_result: Optional[dict[str, Any]] = None
+    gate_result: dict[str, Any] | None = None
     retrieved_example_ids: list[str] = Field(default_factory=list)
     repo_context_signals: dict[str, Any] = Field(default_factory=dict)
-    stop_reason: Optional[str] = None
+    stop_reason: str | None = None
     code_extraction_failed: bool = False
     reviewer_skipped_counterexample: bool = False
-    reviewer_verdict: Optional[str] = None
-    created_at: Optional[str] = None
+    reviewer_verdict: str | None = None
+    created_at: str | None = None
 
 
 class DebateResponse(BaseModel):
@@ -207,20 +206,20 @@ class DebateResponse(BaseModel):
     target_file: str
     ticket: str
     status: str
-    tenant_id: Optional[str] = None
-    merged: Optional[bool] = None
-    final_gate: Optional[dict[str, Any]] = None
-    cost: Optional[dict[str, Any]] = None
-    error_message: Optional[str] = None
-    pr_repo: Optional[str] = None
-    pr_number: Optional[int] = None
-    commit_sha: Optional[str] = None
-    webhook_url: Optional[str] = None
-    reviewer_verdict: Optional[str] = None
-    needs_human_review: Optional[bool] = None
+    tenant_id: str | None = None
+    merged: bool | None = None
+    final_gate: dict[str, Any] | None = None
+    cost: dict[str, Any] | None = None
+    error_message: str | None = None
+    pr_repo: str | None = None
+    pr_number: int | None = None
+    commit_sha: str | None = None
+    webhook_url: str | None = None
+    reviewer_verdict: str | None = None
+    needs_human_review: bool | None = None
     rounds: list[RoundResponse] = Field(default_factory=list)
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class HealthResponse(BaseModel):
@@ -229,25 +228,25 @@ class HealthResponse(BaseModel):
     status: str
     db_reachable: bool
     sandbox_image_present: bool
-    details: Optional[dict[str, str]] = None
+    details: dict[str, str] | None = None
 
 
 class AdminDebateSummary(BaseModel):
     """Non-sensitive cross-tenant summary for authorized operators."""
 
     id: str
-    tenant_id: Optional[str] = None
+    tenant_id: str | None = None
     repo_ref: str
     target_file: str
     status: str
-    merged: Optional[bool] = None
-    reviewer_verdict: Optional[str] = None
-    needs_human_review: Optional[bool] = None
-    pr_repo: Optional[str] = None
-    pr_number: Optional[int] = None
-    commit_sha: Optional[str] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    merged: bool | None = None
+    reviewer_verdict: str | None = None
+    needs_human_review: bool | None = None
+    pr_repo: str | None = None
+    pr_number: int | None = None
+    commit_sha: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class AdminDebateListResponse(BaseModel):

@@ -152,19 +152,7 @@ def _run_containerized(
     - Is automatically removed after execution
     """
     effective_timeout = timeout or settings.SANDBOX_TIMEOUT
-    docker_cmd = [
-        "docker", "run",
-        "--rm",
-        "--network", "none",
-        "--memory", settings.SANDBOX_MEMORY_LIMIT,
-        "--cpus", settings.SANDBOX_CPU_LIMIT,
-        "--pids-limit", str(settings.SANDBOX_PID_LIMIT),
-        "--read-only",
-        "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-        "-v", f"{repo_dir.resolve()}:/workspace:rw",
-        "-w", "/workspace",
-        settings.SANDBOX_IMAGE,
-    ] + cmd
+    docker_cmd = ["docker", "run", "--rm", "--network", "none", "--memory", settings.SANDBOX_MEMORY_LIMIT, "--cpus", settings.SANDBOX_CPU_LIMIT, "--pids-limit", str(settings.SANDBOX_PID_LIMIT), "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "-v", f"{repo_dir.resolve()}:/workspace:rw", "-w", "/workspace", settings.SANDBOX_IMAGE, *cmd]
 
     try:
         proc = subprocess.run(

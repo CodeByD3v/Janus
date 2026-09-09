@@ -24,7 +24,7 @@ import signal
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +67,7 @@ def _mark_session_error(session_id: str, error_message: str) -> None:
         if session:
             session.status = "error"  # type: ignore[assignment]
             session.error_message = error_message  # type: ignore[assignment]
-            session.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+            session.updated_at = datetime.now(UTC)  # type: ignore[assignment]
 
 
 def _load_commit_sha(session_id: str) -> str | None:
@@ -86,17 +86,17 @@ def _load_swept_pr_sessions(sweep_interval_seconds: int) -> list[dict[str, Any]]
     """
     from datetime import timedelta
 
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=sweep_interval_seconds + 30)
+    cutoff = datetime.now(UTC) - timedelta(seconds=sweep_interval_seconds + 30)
     results = []
     with get_session() as db:
         sessions = (
             db.query(DebateSession)
             .filter(
-                DebateSession.status == "error",
-                DebateSession.pr_repo.isnot(None),
-                DebateSession.pr_number.isnot(None),
-                DebateSession.error_message.like("Swept by zombie%"),
-                DebateSession.updated_at >= cutoff,
+                DebateSession.status == "error",  # type: ignore
+                DebateSession.pr_repo.isnot(None),  # type: ignore
+                DebateSession.pr_number.isnot(None),  # type: ignore
+                DebateSession.error_message.like("Swept by zombie%"),  # type: ignore
+                DebateSession.updated_at >= cutoff,  # type: ignore
             )
             .all()
         )
@@ -225,7 +225,7 @@ class Worker:
         synchronous DB access called directly from this same async
         function.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if (
             self._last_sweep_at is not None
             and (now - self._last_sweep_at).total_seconds()

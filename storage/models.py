@@ -12,14 +12,13 @@ and PostgreSQL (prod) via the DATABASE_URL config.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
-    Float,
     ForeignKey,
     Index,
     Integer,
@@ -53,8 +52,8 @@ class GithubInstallation(Base):
     installation_id: int = Column(Integer, nullable=False, unique=True, index=True)  # type: ignore[assignment]
     account_login: str = Column(String(256), nullable=False)  # type: ignore[assignment]
     account_type: str = Column(String(32), nullable=False)  # type: ignore[assignment]  # 'User' or 'Organization'
-    tenant_id: Optional[str] = Column(String(128), nullable=True)  # type: ignore[assignment]
-    created_at: datetime = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))  # type: ignore[assignment]
+    tenant_id: str | None = Column(String(128), nullable=True)  # type: ignore[assignment]
+    created_at: datetime = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))  # type: ignore[assignment]
 
 
 class DebateSession(Base):
@@ -69,43 +68,43 @@ class DebateSession(Base):
     status: str = Column(  # type: ignore[assignment]
         String(32), nullable=False, default="queued", index=True
     )
-    tenant_id: Optional[str] = Column(String(128), nullable=True)  # type: ignore[assignment]
-    merged: Optional[bool] = Column(Boolean, nullable=True)  # type: ignore[assignment]
-    final_gate_json: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
-    cost_json: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
-    error_message: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
-    sandbox_path: Optional[str] = Column(String(512), nullable=True)  # type: ignore[assignment]
+    tenant_id: str | None = Column(String(128), nullable=True)  # type: ignore[assignment]
+    merged: bool | None = Column(Boolean, nullable=True)  # type: ignore[assignment]
+    final_gate_json: str | None = Column(Text, nullable=True)  # type: ignore[assignment]
+    cost_json: str | None = Column(Text, nullable=True)  # type: ignore[assignment]
+    error_message: str | None = Column(Text, nullable=True)  # type: ignore[assignment]
+    sandbox_path: str | None = Column(String(512), nullable=True)  # type: ignore[assignment]
     # GAP 17 / TASK 18 — optional, all independent of each other and of
     # everything else here. A session with none of these set behaves
     # exactly as it did before this feature existed (see notifications.py).
-    pr_repo: Optional[str] = Column(String(256), nullable=True)  # type: ignore[assignment]
-    pr_number: Optional[int] = Column(Integer, nullable=True)  # type: ignore[assignment]
-    commit_sha: Optional[str] = Column(String(64), nullable=True)  # type: ignore[assignment]
-    pr_branch: Optional[str] = Column(String(256), nullable=True)  # type: ignore[assignment]
-    pr_author: Optional[str] = Column(String(256), nullable=True)  # type: ignore[assignment]
-    github_installation_id: Optional[int] = Column(Integer, nullable=True, index=True)  # type: ignore[assignment]
-    webhook_url: Optional[str] = Column(String(2048), nullable=True)  # type: ignore[assignment]
+    pr_repo: str | None = Column(String(256), nullable=True)  # type: ignore[assignment]
+    pr_number: int | None = Column(Integer, nullable=True)  # type: ignore[assignment]
+    commit_sha: str | None = Column(String(64), nullable=True)  # type: ignore[assignment]
+    pr_branch: str | None = Column(String(256), nullable=True)  # type: ignore[assignment]
+    pr_author: str | None = Column(String(256), nullable=True)  # type: ignore[assignment]
+    github_installation_id: int | None = Column(Integer, nullable=True, index=True)  # type: ignore[assignment]
+    webhook_url: str | None = Column(String(2048), nullable=True)  # type: ignore[assignment]
     # Janus 2.0 — Reviewer-first verdict tracking.
     # reviewer_verdict stores the final verdict from the last review round:
     # "PASS", "ISSUE_FOUND", or "INCONCLUSIVE".
     # needs_human_review is True when any round returned INCONCLUSIVE.
-    reviewer_verdict: Optional[str] = Column(String(32), nullable=True)  # type: ignore[assignment]
-    needs_human_review: Optional[bool] = Column(Boolean, nullable=True, default=False)  # type: ignore[assignment]
+    reviewer_verdict: str | None = Column(String(32), nullable=True)  # type: ignore[assignment]
+    needs_human_review: bool | None = Column(Boolean, nullable=True, default=False)  # type: ignore[assignment]
     # Janus 2.0 — model configuration used for this debate (Phase 5 BYOK)
-    model_provider: Optional[str] = Column(String(32), nullable=True)  # type: ignore[assignment]
-    model_name: Optional[str] = Column(String(128), nullable=True)  # type: ignore[assignment]
-    model_api_key_encrypted: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
+    model_provider: str | None = Column(String(32), nullable=True)  # type: ignore[assignment]
+    model_name: str | None = Column(String(128), nullable=True)  # type: ignore[assignment]
+    model_api_key_encrypted: str | None = Column(Text, nullable=True)  # type: ignore[assignment]
     created_at: datetime = Column(
   # type: ignore[assignment]
         DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
     updated_at: datetime = Column(  # type: ignore[assignment]
         DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
     # No type annotation here on purpose: with __allow_unmapped__ = True,
@@ -127,7 +126,7 @@ class DebateSession(Base):
     @property
     def final_gate(self) -> dict[str, Any] | None:
         if self.final_gate_json:
-            return json.loads(self.final_gate_json)  # type: ignore[arg-type]
+            return json.loads(self.final_gate_json)  # type: ignore
         return None
 
     @final_gate.setter
@@ -137,7 +136,7 @@ class DebateSession(Base):
     @property
     def cost(self) -> dict[str, Any] | None:
         if self.cost_json:
-            return json.loads(self.cost_json)  # type: ignore[arg-type]
+            return json.loads(self.cost_json)  # type: ignore
         return None
 
     @cost.setter
@@ -184,10 +183,10 @@ class Round(Base):
     round_num: int = Column(Integer, nullable=False)  # type: ignore[assignment]
     patch_text: str = Column(Text, nullable=False, default="")  # type: ignore[assignment]
     reviewer_text: str = Column(Text, nullable=False, default="")  # type: ignore[assignment]
-    gate_result_json: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
-    retrieved_example_ids_json: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
-    repo_context_signals_json: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
-    stop_reason: Optional[str] = Column(String(64), nullable=True)  # type: ignore[assignment]
+    gate_result_json: str | None = Column(Text, nullable=True)  # type: ignore[assignment]
+    retrieved_example_ids_json: str | None = Column(Text, nullable=True)  # type: ignore[assignment]
+    repo_context_signals_json: str | None = Column(Text, nullable=True)  # type: ignore[assignment]
+    stop_reason: str | None = Column(String(64), nullable=True)  # type: ignore[assignment]
     code_extraction_failed: bool = Column(  # type: ignore[assignment]
         Boolean, nullable=False, default=False
     )
@@ -195,11 +194,11 @@ class Round(Base):
         Boolean, nullable=False, default=False
     )
     # Janus 2.0 — the Reviewer's verdict for this round
-    reviewer_verdict: Optional[str] = Column(String(32), nullable=True)  # type: ignore[assignment]
+    reviewer_verdict: str | None = Column(String(32), nullable=True)  # type: ignore[assignment]
     created_at: datetime = Column(  # type: ignore[assignment]
         DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
 
     # See the matching note on DebateSession.rounds above — no annotation
@@ -211,7 +210,7 @@ class Round(Base):
     @property
     def gate_result(self) -> dict[str, Any] | None:
         if self.gate_result_json:
-            return json.loads(self.gate_result_json)  # type: ignore[arg-type]
+            return json.loads(self.gate_result_json)  # type: ignore
         return None
 
     @gate_result.setter
@@ -221,7 +220,7 @@ class Round(Base):
     @property
     def retrieved_example_ids(self) -> list[str]:
         if self.retrieved_example_ids_json:
-            return json.loads(self.retrieved_example_ids_json)  # type: ignore[arg-type]
+            return json.loads(self.retrieved_example_ids_json)  # type: ignore
         return []
 
     @retrieved_example_ids.setter
@@ -231,7 +230,7 @@ class Round(Base):
     @property
     def repo_context_signals(self) -> dict[str, Any]:
         if self.repo_context_signals_json:
-            return json.loads(self.repo_context_signals_json)  # type: ignore[arg-type]
+            return json.loads(self.repo_context_signals_json)  # type: ignore
         return {}
 
     @repo_context_signals.setter

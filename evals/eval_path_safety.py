@@ -10,7 +10,6 @@ filesystem path), plus the fast-fail target_file pre-check.
 from __future__ import annotations
 
 import sys
-import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,9 +17,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.config import settings as real_settings  # noqa: E402
-import core.path_safety as path_safety_module  # noqa: E402
-from core.path_safety import (  # noqa: E402
+import core.path_safety as path_safety_module
+from core.config import settings as real_settings
+from core.path_safety import (
     looks_like_path_traversal,
     validate_repo_ref,
 )

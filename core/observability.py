@@ -20,6 +20,7 @@ import json
 import logging
 import sys
 import threading
+from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -50,7 +51,7 @@ class StructuredFormatter(logging.Formatter):
 class StructuredLogger(logging.LoggerAdapter):
     """Logger adapter that accepts keyword arguments as structured fields."""
 
-    def process(self, msg: str, kwargs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    def process(self, msg: Any, kwargs: MutableMapping[str, Any]) -> tuple[Any, MutableMapping[str, Any]]:
         extra = kwargs.get("extra", {})
         # Pull out any non-standard kwargs and stuff them into extra._extra
         structured_extra: dict[str, Any] = {}

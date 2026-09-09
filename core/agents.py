@@ -44,7 +44,7 @@ from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
 from mcp import StdioServerParameters
 
 from core.config import ModelConfig, settings
-from core.llm_client import build_model, build_model_for_config
+from core.llm_client import build_model_for_config
 from core.observability import get_logger
 
 logger = get_logger(__name__)

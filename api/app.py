@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import subprocess
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -64,7 +63,7 @@ if _cors_origins:
         allow_headers=["X-API-Key", "Content-Type"],
     )
 
-from api.github_app import github_router
+from api.github_app import github_router  # noqa: E402
 
 app.include_router(github_router)
 
@@ -170,12 +169,12 @@ def list_admin_debates(
     with get_session() as db:
         query = db.query(DebateSession)
         if tenant_filter is not None:
-            query = query.filter(DebateSession.tenant_id == tenant_filter)
+            query = query.filter(DebateSession.tenant_id == tenant_filter)  # type: ignore
         if status is not None:
-            query = query.filter(DebateSession.status == status)
+            query = query.filter(DebateSession.status == status)  # type: ignore
         total = query.count()
         sessions = (
-            query.order_by(DebateSession.created_at.desc())
+            query.order_by(DebateSession.created_at.desc())  # type: ignore
             .offset(offset)
             .limit(limit)
             .all()

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from cryptography.fernet import Fernet

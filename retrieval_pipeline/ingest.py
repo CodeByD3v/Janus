@@ -25,9 +25,9 @@ from sentence_transformers import SentenceTransformer
 # Resolve project-root imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.config import settings  # noqa: E402
-from core.observability import get_logger  # noqa: E402
-from retrieval_pipeline.schema import RealCatchExample, validate_record  # noqa: E402
+from core.config import settings
+from core.observability import get_logger
+from retrieval_pipeline.schema import RealCatchExample, validate_record
 
 logger = get_logger(__name__)
 
@@ -117,8 +117,8 @@ def ingest_file(
     collection.upsert(
         ids=ids,
         documents=documents,
-        embeddings=embeddings,
-        metadatas=metadatas,
+        embeddings=embeddings,  # type: ignore
+        metadatas=metadatas,  # type: ignore
     )
 
     accepted = len(valid_records)

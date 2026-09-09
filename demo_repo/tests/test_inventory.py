@@ -1,4 +1,4 @@
-from inventory import Item, average_price, apply_bulk_discount
+from inventory import Item, apply_bulk_discount, average_price
 
 
 def test_average_price_basic():

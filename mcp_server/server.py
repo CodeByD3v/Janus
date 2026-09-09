@@ -22,9 +22,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.fastmcp import FastMCP
 
-import core.gate as gate  # noqa: E402
+import core.gate as gate
 
 mcp = FastMCP("adversarial-review-gate")
 

@@ -122,9 +122,9 @@ def execute_auto_merge(
         "merge_method": merge_method,
         "commit_title": f"[Janus] Auto-merge PR #{pr_number}",
         "commit_message": (
-            f"Janus adversarial code review passed.\n"
-            f"Reviewer verdict: PASS\n"
-            f"Gate: all checks passed"
+            "Janus adversarial code review passed.\n"
+            "Reviewer verdict: PASS\n"
+            "Gate: all checks passed"
         ),
     }
     if commit_sha:

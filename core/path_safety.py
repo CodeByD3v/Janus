@@ -93,7 +93,4 @@ def looks_like_path_traversal(target_file: str) -> bool:
         or Path(target_file).is_absolute()
     ):
         return True
-    if any(part == ".." for part in normalized.split("/")):
-        return True
-
-    return False
+    return bool(any(part == ".." for part in normalized.split("/")))

@@ -1,7 +1,7 @@
 import logging
+import shutil
 import subprocess
 import tempfile
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +18,7 @@ class SandboxConfig:
 
 class SandboxRunner:
     """Runs untrusted code inside a highly restricted Docker container."""
-    
+
     def __init__(self, config: SandboxConfig = None):
         self.config = config or SandboxConfig()
 
@@ -45,7 +45,7 @@ class SandboxRunner:
         self, cmd: list[str], repo_dir: Path, timeout: int | None = None
     ) -> tuple[int, str]:
         """Execute a command inside a locked-down Docker container.
-        
+
         The container:
         - Mounts repo_dir as /workspace (read-write)
         - Has no network access (--network none)
@@ -56,21 +56,9 @@ class SandboxRunner:
         if not self.is_docker_available():
             logger.error("Docker is required but unavailable. Failing securely.")
             return 1, "GATE ERROR: Docker is required but unavailable. Failing securely."
-            
+
         effective_timeout = timeout or self.config.timeout_seconds
-        docker_cmd = [
-            "docker", "run",
-            "--rm",
-            "--network", "none",
-            "--memory", self.config.memory_limit,
-            "--cpus", self.config.cpu_limit,
-            "--pids-limit", str(self.config.pid_limit),
-            "--read-only",
-            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-            "-v", f"{repo_dir.resolve()}:/workspace:rw",
-            "-w", "/workspace",
-            self.config.image,
-        ] + cmd
+        docker_cmd = ["docker", "run", "--rm", "--network", "none", "--memory", self.config.memory_limit, "--cpus", self.config.cpu_limit, "--pids-limit", str(self.config.pid_limit), "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "-v", f"{repo_dir.resolve()}:/workspace:rw", "-w", "/workspace", self.config.image, *cmd]
 
         try:
             proc = subprocess.run(

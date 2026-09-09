@@ -7,13 +7,11 @@ Containerized-execution tests are skipped when Docker is unavailable.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 
 # Ensure project root is importable
 import sys
-import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,8 +19,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.config import settings as real_settings  # noqa: E402
-from core.gate import (  # noqa: E402
+from core.config import settings as real_settings
+from core.gate import (
     _resolve_scoped_path,
     compare_test_results,
     run_candidate_test,
@@ -197,13 +195,13 @@ class TestRepoDirValidation:
         isn't a sandbox path, independent of sandbox_copy's own
         ALLOWED_REPO_ROOTS check (an agent can call these directly
         without ever having called sandbox_copy first)."""
-        for fn, kwargs in [
+        for fn, kwargs in [  # type: ignore
             (run_linter, {}),
             (run_type_check, {}),
             (run_tests, {}),
             (run_security_scan, {}),
         ]:
-            result = fn(bad_repo_dir, **kwargs)
+            result = fn(bad_repo_dir, **kwargs)  # type: ignore
             assert result["passed"] is False
             assert "temp directory" in result["detail"]
 

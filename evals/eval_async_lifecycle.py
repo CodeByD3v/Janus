@@ -84,7 +84,7 @@ def test_llm_stream_is_bounded_by_call_timeout(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         orchestrator,
         "settings",
-        replace(real_settings, LLM_CALL_TIMEOUT_SECONDS=0.02),
+        replace(real_settings, LLM_CALL_TIMEOUT_SECONDS=0.02),  # type: ignore
     )
     monkeypatch.setattr(orchestrator, "_circuit_breaker", _CircuitBreaker())
 

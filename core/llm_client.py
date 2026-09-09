@@ -197,9 +197,9 @@ def build_model(model_name: str) -> tuple[_KeyedGemini, int]:
 
 
 def build_model_for_config(
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
     default_model: str | None = None,
-) -> tuple[object, int]:
+) -> tuple[Any, int]:
     """Build a model instance for any supported provider.
 
     Returns (model_instance, key_index).

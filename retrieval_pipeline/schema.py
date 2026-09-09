@@ -21,7 +21,7 @@ class RealCatchExample(BaseModel):
 
     @field_validator("id", "bug_pattern", "code_snippet", "review_comment", "fix_summary")
     @classmethod
-    def must_be_non_empty(cls, value: str, info: object) -> str:  # noqa: ANN001
+    def must_be_non_empty(cls, value: str, info: object) -> str:
         """Reject empty or whitespace-only strings."""
         if not value or not value.strip():
             raise ValueError("Field must be a non-empty string")

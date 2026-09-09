@@ -19,17 +19,15 @@ from __future__ import annotations
 import os
 import sys
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
-from storage.db import get_session, run_migrations, sweep_zombie_sessions  # noqa: E402
-from storage.models import DebateSession, Round  # noqa: E402
+from storage.db import get_session, run_migrations, sweep_zombie_sessions
+from storage.models import DebateSession, Round
 
 run_migrations()
 
@@ -46,7 +44,7 @@ def _make_session(
             ticket="t",
             status=status,
         )
-        ts = datetime.now(timezone.utc) - timedelta(minutes=updated_minutes_ago)
+        ts = datetime.now(UTC) - timedelta(minutes=updated_minutes_ago)
         s.updated_at = ts
         s.created_at = ts
         db.add(s)
@@ -56,7 +54,7 @@ def _make_session(
 def _get_status(session_id: str) -> str:
     with get_session() as db:
         s = db.query(DebateSession).filter_by(id=session_id).first()
-        return s.status
+        return s.status  # type: ignore
 
 
 def _add_round(session_id: str, minutes_ago: float, round_num: int = 1) -> None:
@@ -67,7 +65,7 @@ def _add_round(session_id: str, minutes_ago: float, round_num: int = 1) -> None:
             patch_text="x",
             reviewer_text="y",
         )
-        r.created_at = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+        r.created_at = datetime.now(UTC) - timedelta(minutes=minutes_ago)
         db.add(r)
 
 
@@ -177,7 +175,7 @@ def test_sweeps_stuck_queued_session():
 def test_does_not_sweep_recently_queued_session():
     """A session queued moments ago should not be swept."""
     sid = _make_session("queued", updated_minutes_ago=5)
-    result = sweep_zombie_sessions(timeout_minutes=30, queued_timeout_minutes=60)
+    sweep_zombie_sessions(timeout_minutes=30, queued_timeout_minutes=60)
     assert _get_status(sid) == "queued"
 
 

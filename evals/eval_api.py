@@ -12,7 +12,6 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -30,17 +29,17 @@ os.environ[
     "ALLOWED_REPO_ROOTS"
 ] = str(Path(__file__).resolve().parent.parent)
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from api.app import app  # noqa: E402
-from api.auth import KeyStore, key_store, rate_limiter  # noqa: E402
-from storage.db import get_session, run_migrations  # noqa: E402
-from storage.models import DebateSession  # noqa: E402
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+
 import storage.db
+from api.app import app
+from api.auth import KeyStore, key_store, rate_limiter
 from core.config import settings
+from storage.db import get_session, run_migrations
+from storage.models import DebateSession
 
 # Since settings may have already been instantiated by another test module
 # importing core.config (which reads from .env), we must manually update
