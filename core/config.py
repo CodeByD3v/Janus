@@ -32,7 +32,7 @@ except ImportError:
 # Valid provider names for ModelConfig. "google" uses the internal KeyPool;
 # all others route through ADK's LiteLlm wrapper backed by the litellm library.
 SUPPORTED_PROVIDERS = frozenset({
-    "google", "openai", "anthropic", "groq", "nvidia", "cohere",
+    "google", "openai", "anthropic", "groq", "nvidia", "cohere", "ollama",
 })
 
 
@@ -133,6 +133,15 @@ class Settings:
     GROQ_API_KEY: str = field(default_factory=lambda: _optional("GROQ_API_KEY", ""))
     NVIDIA_API_KEY: str = field(default_factory=lambda: _optional("NVIDIA_API_KEY", ""))
     COHERE_API_KEY: str = field(default_factory=lambda: _optional("COHERE_API_KEY", ""))
+    # Ollama is local and does not require an API key. Keep it opt-in so an
+    # otherwise unconfigured worker does not claim it has an LLM available.
+    OLLAMA_ENABLED: bool = field(
+        default_factory=lambda: _optional("OLLAMA_ENABLED", "false").lower()
+        in ("true", "1", "yes")
+    )
+    OLLAMA_API_BASE: str = field(
+        default_factory=lambda: _optional("OLLAMA_API_BASE", "http://localhost:11434")
+    )
     BYOK_ENCRYPTION_KEY: str = field(
         default_factory=lambda: _optional("BYOK_ENCRYPTION_KEY", "")
     )
@@ -436,7 +445,7 @@ class Settings:
 
     def has_llm_credentials(self) -> bool:
         """Return whether at least one server-managed provider credential exists."""
-        return bool(self.google_api_keys()) or any(
+        return self.OLLAMA_ENABLED or bool(self.google_api_keys()) or any(
             (
                 self.OPENAI_API_KEY,
                 self.ANTHROPIC_API_KEY,

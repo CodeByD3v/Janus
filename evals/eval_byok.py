@@ -46,7 +46,7 @@ def test_model_config_is_google():
 
 def test_supported_providers():
     assert isinstance(SUPPORTED_PROVIDERS, frozenset)
-    for provider in ["google", "openai", "anthropic", "groq"]:
+    for provider in ["google", "openai", "anthropic", "groq", "ollama"]:
         assert provider in SUPPORTED_PROVIDERS
 
 # ---------------------------------------------------------------------------
@@ -85,8 +85,8 @@ def test_build_model_for_config_google(mock_build_model):
 def test_build_model_for_config_litellm_missing():
     config = ModelConfig(provider="openai", model="gpt-4o")
     
-    # Hide google.adk.models.LiteLlm
-    with patch.dict(sys.modules, {"google.adk.models": None}):
+    # Hide google.adk.models.lite_llm
+    with patch.dict(sys.modules, {"google.adk.models.lite_llm": None}):
         with pytest.raises(RuntimeError, match="LiteLlm is required for provider 'openai'"):
             build_model_for_config(config)
 
@@ -101,9 +101,9 @@ def test_build_model_for_config_no_api_key(monkeypatch):
     )
     
     # Mock litellm to avoid import error
-    mock_adk_models = MagicMock()
-    mock_adk_models.LiteLlm = MagicMock()
-    with patch.dict(sys.modules, {"google.adk.models": mock_adk_models}):
+    mock_lite_llm_module = MagicMock()
+    mock_lite_llm_module.LiteLlm = MagicMock()
+    with patch.dict(sys.modules, {"google.adk.models.lite_llm": mock_lite_llm_module}):
         with pytest.raises(RuntimeError, match="No API key available for provider 'openai'"):
             build_model_for_config(config)
 
@@ -114,15 +114,38 @@ def test_build_model_for_config_success():
     mock_litellm_instance = MagicMock()
     mock_litellm_class = MagicMock(return_value=mock_litellm_instance)
     
-    mock_adk_models = MagicMock()
-    mock_adk_models.LiteLlm = mock_litellm_class
+    mock_lite_llm_module = MagicMock()
+    mock_lite_llm_module.LiteLlm = mock_litellm_class
     
-    with patch.dict(sys.modules, {"google.adk.models": mock_adk_models}):
+    with patch.dict(sys.modules, {"google.adk.models.lite_llm": mock_lite_llm_module}):
         model, index = build_model_for_config(config)
         
         assert model is mock_litellm_instance
         assert index == -1
         mock_litellm_class.assert_called_once_with(model="openai/gpt-4o", api_key="my-key")
+
+def test_build_model_for_config_ollama(monkeypatch):
+    mock_litellm_instance = MagicMock()
+    mock_litellm_class = MagicMock(return_value=mock_litellm_instance)
+    mock_lite_llm_module = MagicMock()
+    mock_lite_llm_module.LiteLlm = mock_litellm_class
+    monkeypatch.setattr(
+        "core.llm_client.settings",
+        dataclasses.replace(
+            settings, OLLAMA_ENABLED=True, OLLAMA_API_BASE="http://localhost:11434"
+        ),
+    )
+
+    with patch.dict(sys.modules, {"google.adk.models.lite_llm": mock_lite_llm_module}):
+        model, index = build_model_for_config(
+            ModelConfig(provider="ollama", model="qwen2.5-coder:7b")
+        )
+
+    assert model is mock_litellm_instance
+    assert index == -1
+    mock_litellm_class.assert_called_once_with(
+        model="ollama/qwen2.5-coder:7b", api_base="http://localhost:11434"
+    )
 
 # ---------------------------------------------------------------------------
 # 5. RepoConfig model parsing

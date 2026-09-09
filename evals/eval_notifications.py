@@ -414,8 +414,8 @@ def test_notify_posts_pr_comment_when_pr_reference_given(monkeypatch):
             webhook_url=None,
         )
 
-    mock_post.assert_called_once()
-    assert "issues/7/comments" in mock_post.call_args[0][0]
+        mock_post.assert_called_once()
+        assert "pulls/7/reviews" in mock_post.call_args[0][0]
 
 
 def test_notify_posts_webhook_when_url_given():

@@ -222,7 +222,7 @@ def build_model_for_config(
     if provider == "google" and "/" in effective_model:
         prefix, rest = effective_model.split("/", 1)
         # Check against the allowed list of non-Google providers
-        if prefix in ("openai", "anthropic", "groq", "cohere", "nvidia"):
+        if prefix in ("openai", "anthropic", "groq", "cohere", "nvidia", "ollama"):
             provider = prefix
             effective_model = rest
             model_config = ModelConfig(
@@ -244,7 +244,11 @@ def build_model_for_config(
         ) from e
 
     api_key = settings.byok_api_key(model_config)
-    if not api_key:
+    if provider == "ollama" and not settings.OLLAMA_ENABLED:
+        raise RuntimeError(
+            "Ollama is disabled. Set OLLAMA_ENABLED=true after starting a local Ollama server."
+        )
+    if provider != "ollama" and not api_key:
         raise RuntimeError(
             f"No API key available for provider '{model_config.provider}'. "
             f"Provide one via the API request (BYOK) or set the "
@@ -261,7 +265,12 @@ def build_model_for_config(
         # Never log the API key itself (Hard Rule 5)
     )
 
-    model = LiteLlm(model=litellm_model, api_key=api_key)
+    additional_args: dict[str, Any] = {}
+    if provider == "ollama":
+        additional_args["api_base"] = settings.OLLAMA_API_BASE
+    else:
+        additional_args["api_key"] = api_key
+    model = LiteLlm(model=litellm_model, **additional_args)
     return model, -1  # -1 = no key pool index
 
 

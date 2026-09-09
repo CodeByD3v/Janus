@@ -19,17 +19,16 @@ import pytest
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Patch DATABASE_URL to use in-memory SQLite BEFORE importing the app
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 
 # Every test in this file uses repo_ref="demo_repo" (relative to the repo
 # root, matching how `pytest` is invoked from CI/locally). The repo_ref
 # allowlist (core/path_safety.py) is fail-closed by design — an empty
 # ALLOWED_REPO_ROOTS rejects every repo_ref, including this test suite's
 # own fixtures, unless explicitly configured here.
-os.environ.setdefault(
-    "ALLOWED_REPO_ROOTS", str(Path(__file__).resolve().parent.parent)
-)
+os.environ[
+    "ALLOWED_REPO_ROOTS"
+] = str(Path(__file__).resolve().parent.parent)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -37,6 +36,26 @@ from api.app import app  # noqa: E402
 from api.auth import KeyStore, key_store, rate_limiter  # noqa: E402
 from storage.db import get_session, run_migrations  # noqa: E402
 from storage.models import DebateSession  # noqa: E402
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+import storage.db
+from core.config import settings
+
+# Since settings may have already been instantiated by another test module
+# importing core.config (which reads from .env), we must manually update
+# the cached attribute here to avoid path validation failures.
+object.__setattr__(settings, "ALLOWED_REPO_ROOTS", str(Path(__file__).resolve().parent.parent))
+
+# Overwrite the engine in storage.db to guarantee an in-memory DB is used,
+# even if storage.db was imported earlier by another test suite.
+_test_engine = create_engine(
+    "sqlite:///:memory:",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+storage.db._engine = _test_engine
+storage.db._SessionFactory = sessionmaker(bind=_test_engine, expire_on_commit=False)
 
 # ---------------------------------------------------------------------------
 # Fixtures

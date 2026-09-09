@@ -276,6 +276,8 @@ command details.
 | `ALLOWED_REPO_ROOTS` | API/worker | empty | Comma-separated absolute roots allowed for local `repo_ref` values; empty fails closed |
 | `DATABASE_URL` | Yes | `sqlite:///./adversarial_code_review.db` | DB connection |
 | `ADV_REVIEW_MODEL` | No | `gemini-2.5-flash` | LLM model |
+| `OLLAMA_ENABLED` | No | `false` | Enable a local Ollama runtime as an LLM provider |
+| `OLLAMA_API_BASE` | No | `http://localhost:11434` | Local Ollama API base URL |
 | `USE_CONTAINERIZED_GATE` | No | `false` | Docker sandbox |
 | `SANDBOX_IMAGE` | If containerized | `adv-review-sandbox:latest` | Sandbox image |
 | `ADV_REVIEW_MAX_ROUNDS` | No | `5` | Debate round cap; must be at least 1 |
