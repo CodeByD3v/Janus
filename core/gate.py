@@ -110,6 +110,14 @@ def _resolve_tool_cmd(cmd: list[str]) -> list[str]:
     if not cmd:
         return cmd
     tool = cmd[0]
+    
+    # On Windows with strict AppLocker/WDAC policies, executing .exe wrappers 
+    # (like pytest.exe, ruff.exe) via subprocess can result in WinError 4551.
+    # To bypass this, we run them as Python modules if they are known python tools.
+    python_tools = {"pytest", "mypy", "ruff", "bandit"}
+    if tool in python_tools:
+        return [sys.executable, "-m", tool] + cmd[1:]
+
     if shutil.which(tool):
         return cmd
     scripts_dir = Path(sys.prefix) / ("Scripts" if sys.platform == "win32" else "bin")

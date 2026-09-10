@@ -166,6 +166,17 @@ def format_debate_summary(
             if len(reviewer_text) > _SUMMARY_SNIPPET_CHARS:
                 snippet += "…"
             lines.append(f"> {snippet}")
+            
+        patch_text = (r.get("patch_text") or "").strip()
+        if patch_text:
+            lines.append("")
+            lines.append("<details>")
+            lines.append(f"<summary>View Patcher Fix (Round {round_num})</summary>")
+            lines.append("")
+            lines.append(f"{patch_text}")
+            lines.append("")
+            lines.append("</details>")
+            
         lines.append("")
 
     if final_gate:

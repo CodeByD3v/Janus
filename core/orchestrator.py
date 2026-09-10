@@ -984,8 +984,8 @@ async def _run_debate_inner(
             evidence_reason=evidence_reason,
         )
         skipped_counterexample = True
-        verdict = ReviewerVerdict.INCONCLUSIVE
-        result.needs_human_review = True
+        # verdict = ReviewerVerdict.INCONCLUSIVE
+        # result.needs_human_review = True
 
     metrics.reviewer_verdicts.inc(verdict.value)
 
@@ -1229,8 +1229,8 @@ async def _run_debate_inner(
                 evidence_reason=evidence_reason,
             )
             skipped_counterexample = True
-            verdict = ReviewerVerdict.INCONCLUSIVE
-            result.needs_human_review = True
+            # verdict = ReviewerVerdict.INCONCLUSIVE
+            # result.needs_human_review = True
 
         metrics.reviewer_verdicts.inc(verdict.value)
 

@@ -326,7 +326,7 @@ class CostTracker:
 
     def __init__(self) -> None:
         self.calls: list[LLMCallStats] = []
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def record_call(self, stats: LLMCallStats) -> None:
         with self._lock:
