@@ -127,6 +127,22 @@ def _is_safe_webhook_url(url: str) -> tuple[bool, str]:
     return pinned_ip is not None, reason
 
 
+def _clean_llm_text(text: str) -> str:
+    """Remove raw JSON tool calls and internal monologue from LLM output."""
+    if not text:
+        return text
+    lines = []
+    for line in text.splitlines():
+        # Heuristic to remove raw Ollama/LiteLLM tool calls dumped as text
+        stripped = line.strip()
+        if stripped.startswith('{"name":') and '"arguments":' in stripped:
+            continue
+        # Ignore LiteLLM function call blocks if they exist
+        if stripped.startswith("Function call:"):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
 def format_debate_summary(
     debate_id: str,
     merged: bool,
@@ -150,7 +166,7 @@ def format_debate_summary(
 
     for r in rounds:
         round_num = r.get("round_num")
-        reviewer_text = (r.get("reviewer_text") or "").strip()
+        reviewer_text = _clean_llm_text((r.get("reviewer_text") or "").strip())
         stop_reason = r.get("stop_reason")
         gate_result = r.get("gate_result") or {}
         gate_passed = gate_result.get("passed")
@@ -165,9 +181,11 @@ def format_debate_summary(
             snippet = reviewer_text[:_SUMMARY_SNIPPET_CHARS]
             if len(reviewer_text) > _SUMMARY_SNIPPET_CHARS:
                 snippet += "…"
+            # Replace newlines with spaces so the blockquote doesn't break
+            snippet = snippet.replace('\n', ' ')
             lines.append(f"> {snippet}")
             
-        patch_text = (r.get("patch_text") or "").strip()
+        patch_text = _clean_llm_text((r.get("patch_text") or "").strip())
         if patch_text:
             lines.append("")
             lines.append("<details>")
