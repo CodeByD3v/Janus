@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import settings as real_settings
 from core.notifications import (
+    _clean_llm_text,
     _is_safe_webhook_url,
     format_debate_summary,
     notify_debate_outcome,
@@ -498,3 +499,154 @@ def test_notify_requires_both_pr_repo_and_pr_number(monkeypatch):
             webhook_url=None,
         )
     mock_post.assert_not_called()
+
+
+# ── _clean_llm_text: raw tool-call / sandbox-path leak regression ──────────
+#
+# Added after a live GitHub App test produced a real PR comment containing
+# raw tool-call JSON, a fenced ```json``` tool-call block, and an absolute
+# Windows sandbox temp path (C:\Users\<name>\AppData\...\adv_review_sandbox_
+# ...). The original _clean_llm_text() only stripped single-line JSON via
+# an exact-prefix string match and had no test coverage at all -- these
+# tests pin down the actual leak patterns observed in production so this
+# can't silently regress.
+
+
+def test_clean_llm_text_strips_bare_json_tool_call():
+    raw = (
+        'Round 0 findings:\n'
+        '{"name": "write_candidate_test", "arguments":{"content": '
+        '"import pytest\\ndef test_x(): pass"}}\n'
+        'That confirms the bug.'
+    )
+    cleaned = _clean_llm_text(raw)
+    assert '"name"' not in cleaned
+    assert '"arguments"' not in cleaned
+    assert "Round 0 findings:" in cleaned
+    assert "That confirms the bug." in cleaned
+
+
+def test_clean_llm_text_strips_multiline_nested_json_tool_call():
+    # Nested braces/quotes inside "arguments" -- the exact shape that broke
+    # the old single-line-prefix heuristic, since the JSON here spans many
+    # lines and contains its own braces inside the patch source.
+    raw = (
+        "Here is the fix.\n"
+        "{\n"
+        '  "name": "write_candidate_test",\n'
+        '  "arguments": {\n'
+        '    "content": "def f(x):\\n    if x is None:\\n        return {}\\n'
+        '    return x"\n'
+        "  }\n"
+        "}\n"
+        "Verdict: PASS"
+    )
+    cleaned = _clean_llm_text(raw)
+    assert '"name"' not in cleaned
+    assert "write_candidate_test" not in cleaned
+    assert "Here is the fix." in cleaned
+    assert "Verdict: PASS" in cleaned
+
+
+def test_clean_llm_text_strips_fenced_json_tool_call_block():
+    raw = (
+        "Reasoning: the fix updates the type hint.\n"
+        "```json\n"
+        '{"name": "write_candidate_test", "arguments": {"content": "x = 1"}}\n'
+        "```\n"
+        "Final answer above."
+    )
+    cleaned = _clean_llm_text(raw)
+    assert "```" not in cleaned
+    assert "write_candidate_test" not in cleaned
+    assert "Reasoning: the fix updates the type hint." in cleaned
+    assert "Final answer above." in cleaned
+
+
+def test_clean_llm_text_preserves_legitimate_fenced_code():
+    # A fenced block that is NOT a tool call (no "arguments" key) must
+    # survive untouched -- e.g. an actual code example in the review.
+    raw = "```python\ndef normalize_name(name):\n    return name.lower()\n```"
+    cleaned = _clean_llm_text(raw)
+    assert "def normalize_name" in cleaned
+    assert "```" in cleaned
+
+
+def test_clean_llm_text_redacts_windows_sandbox_path():
+    raw = (
+        '{"name": "run_candidate_test", "arguments":{"filename": '
+        '"test_none_input.py", "repo_dir": '
+        '"C:\\\\Users\\\\LENOVO\\\\AppData\\\\Local\\\\Temp\\\\'
+        'adv_review_sandbox_itdlph61"}}'
+    )
+    cleaned = _clean_llm_text(raw)
+    # The whole tool call is a JSON blob and gets dropped entirely, so the
+    # path never reaches this stage in practice -- but confirm the path
+    # redaction is independently correct against prose that leaks a path
+    # outside of a JSON blob too (e.g. free-text mentioning the sandbox dir).
+    prose_leak = (
+        "The test ran in "
+        "C:\\Users\\LENOVO\\AppData\\Local\\Temp\\adv_review_sandbox_itdlph61 "
+        "and passed."
+    )
+    cleaned_prose = _clean_llm_text(prose_leak)
+    assert "LENOVO" not in cleaned_prose
+    assert "adv_review_sandbox_itdlph61" not in cleaned_prose
+    assert "[sandbox path redacted]" in cleaned_prose
+    assert "and passed." in cleaned_prose
+
+
+def test_clean_llm_text_redacts_unix_sandbox_path():
+    raw = "Sandbox at /tmp/adv_review_sandbox_ab12cd/repo failed to import."
+    cleaned = _clean_llm_text(raw)
+    assert "adv_review_sandbox_ab12cd" not in cleaned
+    assert "[sandbox path redacted]" in cleaned
+    assert "failed to import." in cleaned
+
+
+def test_clean_llm_text_does_not_redact_unrelated_paths():
+    # Must not be so broad that it eats every path-looking string --
+    # only our own sandbox temp dirs are redacted.
+    raw = "See /home/dev/projects/janus/core/gate.py for the source."
+    cleaned = _clean_llm_text(raw)
+    assert cleaned == raw
+
+
+def test_format_debate_summary_end_to_end_leak_regression():
+    """Reproduces the exact leak pattern from the live GitHub App test:
+    a round whose reviewer_text is raw tool-call JSON plus a sandbox path,
+    and a patch_text containing internal monologue-prefixed prose. The
+    JSON/path leak must be gone from the rendered comment; the prose is
+    intentionally left alone (see _clean_llm_text's docstring)."""
+    rounds = [
+        {
+            "round_num": 0,
+            "reviewer_text": (
+                '{"name": "write_candidate_test", "arguments":{"content": '
+                '"import pytest\\nfrom text_utils import normalize_name"}}'
+            ),
+            "patch_text": "",
+            "stop_reason": None,
+            "gate_result": {"passed": False},
+        },
+        {
+            "round_num": 1,
+            "reviewer_text": "normalize_name(None) crashes with AttributeError.",
+            "patch_text": (
+                '{"name": "run_candidate_test", "arguments":{"filename": '
+                '"test_none_input.py", "repo_dir": "C:\\\\Users\\\\LENOVO\\\\'
+                'AppData\\\\Local\\\\Temp\\\\adv_review_sandbox_itdlph61"}}\n'
+                "Wait, I am the Patcher, not the Reviewer. Fixed the type hint."
+            ),
+            "stop_reason": None,
+            "gate_result": {"passed": True},
+        },
+    ]
+    summary = format_debate_summary(
+        debate_id="d1", merged=True, rounds=rounds, final_gate=None
+    )
+    assert "LENOVO" not in summary
+    assert '"arguments"' not in summary
+    assert "write_candidate_test" not in summary
+    # The prose sentence is expected to remain -- see docstring note above.
+    assert "Fixed the type hint." in summary

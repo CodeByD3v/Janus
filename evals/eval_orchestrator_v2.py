@@ -327,7 +327,7 @@ def test_validate_reviewer_counterexample_does_not_require_evidence_for_pass(tmp
 
 def test_circuit_breaker_zero_cooldown_records_open_state(monkeypatch):
     clock = [0.0]
-    monkeypatch.setattr("core.orchestrator.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("core.orchestrator.circuit_breaker.time.monotonic", lambda: clock[0])
     breaker = CircuitBreaker(failure_threshold=1, cooldown_seconds=0.0)
 
     breaker.record_failure()
@@ -340,7 +340,7 @@ def test_circuit_breaker_zero_cooldown_records_open_state(monkeypatch):
 
 def test_circuit_breaker_uses_configured_threshold_and_single_probe(monkeypatch):
     clock = [0.0]
-    monkeypatch.setattr("core.orchestrator.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("core.orchestrator.circuit_breaker.time.monotonic", lambda: clock[0])
     breaker = CircuitBreaker(failure_threshold=2, cooldown_seconds=10.0)
 
     breaker.record_failure()

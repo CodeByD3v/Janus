@@ -53,6 +53,7 @@ the validated destination through either mechanism.
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
 from typing import Any
 from urllib.parse import urlparse
@@ -127,21 +128,130 @@ def _is_safe_webhook_url(url: str) -> tuple[bool, str]:
     return pinned_ip is not None, reason
 
 
+# Matches an absolute filesystem path likely to reveal local machine
+# details if rendered in a public PR comment: a Windows drive-letter path
+# (C:\Users\...), or a *nix path through one of our own sandbox temp dirs
+# (sandbox_copy() in core/gate.py always prefixes these with
+# "adv_review_sandbox_", so that prefix is what we key on rather than
+# redacting every /tmp path on the system, which would be over-broad).
+_ABS_PATH_PATTERN = re.compile(
+    r"[A-Za-z]:\\(?:[^\s\\\"']+\\)*[^\s\\\"']*"
+    r"|/(?:[^\s\"']*/)*adv_review_sandbox[^\s\"']*"
+)
+
+
+def _redact_paths(text: str) -> str:
+    """Redact absolute sandbox filesystem paths from user-facing text."""
+    return _ABS_PATH_PATTERN.sub("[sandbox path redacted]", text)
+
+
+def _strip_fenced_tool_call_blocks(text: str) -> str:
+    """Remove ```json ... ``` fenced blocks whose content is a tool call.
+
+    Models sometimes wrap a raw tool-call JSON blob in a markdown code
+    fence rather than emitting it as bare text. A fence is only stripped
+    if its contents actually look like a tool call (has both "name" and
+    "arguments" keys) -- a legitimate fenced JSON example in a review
+    comment should survive untouched.
+    """
+
+    def _maybe_strip(match: "re.Match[str]") -> str:
+        body = match.group(1)
+        if '"name":' in body and '"arguments":' in body:
+            return ""
+        return match.group(0)
+
+    return re.sub(r"```(?:json)?\n(.*?)```", _maybe_strip, text, flags=re.DOTALL)
+
+
+def _strip_balanced_json_tool_calls(text: str) -> str:
+    """Remove {"name": ..., "arguments": {...}} blobs from anywhere in
+    the text, including ones that span multiple lines.
+
+    A brace-balancing scan is used instead of a regex because tool-call
+    arguments can themselves contain nested braces, quotes, and escaped
+    characters (e.g. a patch's own source code as a JSON string value)
+    that a naive regex cannot safely match without either under- or
+    over-matching.
+    """
+    # Allow whitespace between the opening brace and "name": pretty-printed
+    # JSON (e.g. '{\n  "name": ...') is common enough in real model output
+    # that an exact '{"name":' prefix match misses it.
+    _name_key = re.compile(r'\{\s*"name"\s*:')
+
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        head_match = _name_key.match(text, i)
+        if text[i] == "{" and head_match:
+            depth = 0
+            in_string = False
+            escape = False
+            j = i
+            while j < n:
+                ch = text[j]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif ch == "\\":
+                        escape = True
+                    elif ch == '"':
+                        in_string = False
+                else:
+                    if ch == '"':
+                        in_string = True
+                    elif ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            j += 1
+                            break
+                j += 1
+            candidate = text[i:j]
+            # Only treat it as a tool call -- and thus drop it -- if it
+            # actually has an "arguments" key. A legitimate code snippet
+            # that happens to start with the literal text {"name": should
+            # not be silently eaten.
+            if '"arguments":' in candidate and depth == 0:
+                i = j
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
 def _clean_llm_text(text: str) -> str:
-    """Remove raw JSON tool calls and internal monologue from LLM output."""
+    """Remove raw JSON tool calls, fenced tool-call blocks, and sandbox
+    filesystem paths from LLM output before it's rendered to a public
+    PR comment.
+
+    This does NOT attempt to strip free-form internal monologue prose
+    (e.g. "Wait, I am the Patcher, not the Reviewer..."). That's a
+    different problem: it isn't structurally distinguishable from
+    legitimate reviewer/patcher commentary by pattern-matching alone,
+    and a heuristic aggressive enough to catch it would risk eating real
+    review content. Eliminating it needs a structural fix upstream (the
+    agent's reasoning and its final answer kept in separate fields, with
+    only the final answer ever reaching notifications), not a text
+    filter here.
+    """
     if not text:
         return text
-    lines = []
-    for line in text.splitlines():
-        # Heuristic to remove raw Ollama/LiteLLM tool calls dumped as text
-        stripped = line.strip()
-        if stripped.startswith('{"name":') and '"arguments":' in stripped:
-            continue
-        # Ignore LiteLLM function call blocks if they exist
-        if stripped.startswith("Function call:"):
-            continue
-        lines.append(line)
-    return "\n".join(lines).strip()
+    text = _strip_fenced_tool_call_blocks(text)
+    text = _strip_balanced_json_tool_calls(text)
+    text = _redact_paths(text)
+
+    lines = [
+        line
+        for line in text.splitlines()
+        if not line.strip().startswith("Function call:")
+    ]
+    cleaned = "\n".join(lines)
+    # Collapse blank-line runs left behind by removals.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 def format_debate_summary(
     debate_id: str,
@@ -184,7 +294,7 @@ def format_debate_summary(
             # Replace newlines with spaces so the blockquote doesn't break
             snippet = snippet.replace('\n', ' ')
             lines.append(f"> {snippet}")
-            
+
         patch_text = _clean_llm_text((r.get("patch_text") or "").strip())
         if patch_text:
             lines.append("")
@@ -194,7 +304,7 @@ def format_debate_summary(
             lines.append(f"{patch_text}")
             lines.append("")
             lines.append("</details>")
-            
+
         lines.append("")
 
     if final_gate:
