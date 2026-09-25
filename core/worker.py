@@ -112,6 +112,34 @@ def _load_swept_pr_sessions(sweep_interval_seconds: int) -> list[dict[str, Any]]
     return results
 
 
+def _update_worker_heartbeat(
+    worker_id: str,
+    status: str = "idle",
+    active_debate_id: str | None = None,
+) -> None:
+    """Record DB-backed heartbeat for worker process liveness tracking."""
+    import os
+    import socket
+    from storage.models import WorkerHeartbeat
+
+    with get_session() as db:
+        hb = db.query(WorkerHeartbeat).filter_by(worker_id=worker_id).first()
+        if hb is None:
+            hb = WorkerHeartbeat(
+                worker_id=worker_id,
+                hostname=socket.gethostname(),
+                pid=os.getpid(),
+                status=status,
+                active_debate_id=active_debate_id,
+                last_heartbeat=datetime.now(UTC),
+            )
+            db.add(hb)
+        else:
+            hb.status = status
+            hb.active_debate_id = active_debate_id
+            hb.last_heartbeat = datetime.now(UTC)
+
+
 class Worker:
     """Database-polling worker that runs adversarial code review debates.
 
@@ -139,19 +167,19 @@ class Worker:
         self._heartbeat_path = Path(configured)
 
     def _touch_heartbeat(self) -> None:
-        """Touch the heartbeat file to prove the worker's poll loop is alive.
-
-        This is the signal Docker healthcheck and k8s livenessProbe read.
-        If the worker's event loop stalls (the exact failure mode observed
-        in the live test), the file's mtime goes stale, and the
-        orchestrator restarts the container.
-        """
+        """Touch the heartbeat file to prove the worker's poll loop is alive."""
         try:
             self._heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
             self._heartbeat_path.touch()
         except OSError:
-            # Non-fatal: heartbeat is a liveness signal, not critical data.
             logger.warning("worker_heartbeat_touch_failed", path=str(self._heartbeat_path))
+
+        # Also persist DB-backed heartbeat status off-thread
+        status = "busy" if self._active_tasks else "idle"
+        asyncio.create_task(
+            asyncio.to_thread(_update_worker_heartbeat, self.worker_id, status)
+        )
+
 
     async def start(self) -> None:
         """Main worker loop. Polls for queued sessions and dispatches debates."""

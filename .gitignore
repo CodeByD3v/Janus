@@ -56,6 +56,11 @@ coverage.xml
 # Docker
 docker-compose.override.yml
 
+# Node / Web
+web/node_modules/
+web/dist/
+
 # Distribution / packaging
 *.whl
 *.tar.gz
+

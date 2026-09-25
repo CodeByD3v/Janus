@@ -251,3 +251,31 @@ class Round(Base):
             "reviewer_verdict": self.reviewer_verdict,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class WorkerHeartbeat(Base):
+    """Tracks active worker liveness, current debate, and heartbeat status."""
+
+    __tablename__ = "worker_heartbeats"
+
+    worker_id: str = Column(String(128), primary_key=True)  # type: ignore[assignment]
+    hostname: str = Column(String(256), nullable=False)  # type: ignore[assignment]
+    pid: int = Column(Integer, nullable=False)  # type: ignore[assignment]
+    status: str = Column(String(32), nullable=False, default="idle")  # type: ignore[assignment]
+    active_debate_id: str | None = Column(String(36), nullable=True)  # type: ignore[assignment]
+    last_heartbeat: datetime = Column(  # type: ignore[assignment]
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "worker_id": self.worker_id,
+            "hostname": self.hostname,
+            "pid": self.pid,
+            "status": self.status,
+            "active_debate_id": self.active_debate_id,
+            "last_heartbeat": self.last_heartbeat.isoformat() if self.last_heartbeat else None,
+        }
+

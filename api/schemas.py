@@ -258,7 +258,60 @@ class AdminDebateListResponse(BaseModel):
     offset: int
 
 
+class DebateSummaryResponse(BaseModel):
+    """Summary metrics for customer or admin overview dashboard."""
+
+    total_debates: int
+    queued_debates: int
+    running_debates: int
+    completed_debates: int
+    error_debates: int
+    merged_count: int
+    pass_verdicts: int
+    issue_found_verdicts: int
+    inconclusive_verdicts: int
+    active_workers_count: int = 0
+
+
+class WorkerHeartbeatSummary(BaseModel):
+    """Liveness summary for a single worker node."""
+
+    worker_id: str
+    hostname: str
+    pid: int
+    status: str
+    active_debate_id: str | None = None
+    last_heartbeat: str | None = None
+    is_alive: bool = True
+
+
+class AdminHealthResponse(BaseModel):
+    """Detailed system health for operator console."""
+
+    status: str
+    db_reachable: bool
+    sandbox_image_present: bool
+    active_workers_count: int
+    workers: list[WorkerHeartbeatSummary] = Field(default_factory=list)
+    circuit_breaker_open: bool = False
+    details: dict[str, Any] | None = None
+
+
+class AdminCalibrationResponse(BaseModel):
+    """Reviewer calibration and evidence acceptance statistics."""
+
+    total_debates: int
+    pass_rate: float
+    issue_found_rate: float
+    inconclusive_rate: float
+    avg_rounds: float
+    max_round_terminations: int
+    counterexample_rejections: int
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ErrorResponse(BaseModel):
     """Standard error response."""
 
     detail: str
+
