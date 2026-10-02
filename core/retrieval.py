@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 import chromadb
-from sentence_transformers import SentenceTransformer
 
 from core.config import settings
 from core.observability import get_logger
@@ -27,16 +26,22 @@ logger = get_logger(__name__)
 # Module-level singletons (lazy-initialised)
 _chroma_client: chromadb.ClientAPI | None = None
 _collection: chromadb.Collection | None = None
-_embedder: SentenceTransformer | None = None
+_embedder: Any | None = None
 
 
-def _get_embedder() -> SentenceTransformer:
+def _get_embedder() -> Any:
     """Return (and cache) the sentence-transformer embedding model."""
     global _embedder
     if _embedder is None:
-        logger.info("loading_embedding_model", model=settings.EMBEDDING_MODEL)
-        _embedder = SentenceTransformer(settings.EMBEDDING_MODEL)
+        try:
+            from sentence_transformers import SentenceTransformer
+            logger.info("loading_embedding_model", model=settings.EMBEDDING_MODEL)
+            _embedder = SentenceTransformer(settings.EMBEDDING_MODEL)
+        except Exception as err:
+            logger.warning("failed_to_load_embedding_model", error=str(err))
+            raise err
     return _embedder
+
 
 
 def _get_collection() -> chromadb.Collection:
@@ -59,37 +64,40 @@ def initialize_store() -> None:
     """Seed the ChromaDB collection with the JSONL seed file if it is empty.
 
     Intended to be called once at application startup.  If the collection
-    already contains documents the call is a no-op.
+    already contains documents the call is a no-op. Fail-soft on system/DLL errors.
     """
-    collection = _get_collection()
-    if collection.count() > 0:
-        logger.info(
-            "store_already_seeded",
-            count=collection.count(),
+    try:
+        collection = _get_collection()
+        if collection.count() > 0:
+            logger.info(
+                "store_already_seeded",
+                count=collection.count(),
+            )
+            return
+
+        seed_path = Path(settings.SEED_DATA_PATH)
+        if not seed_path.exists():
+            logger.warning("seed_file_missing", path=str(seed_path))
+            return
+
+        logger.info("seeding_store", path=str(seed_path))
+
+        # Import ingest lazily to avoid circular dependency at module level
+        from retrieval_pipeline.ingest import ingest_file
+
+        accepted, rejected = ingest_file(
+            seed_path,
+            chroma_persist_dir=settings.CHROMA_PERSIST_DIR,
+            collection_name=settings.CHROMA_COLLECTION,
+            embedding_model_name=settings.EMBEDDING_MODEL,
         )
-        return
-
-    seed_path = Path(settings.SEED_DATA_PATH)
-    if not seed_path.exists():
-        logger.warning("seed_file_missing", path=str(seed_path))
-        return
-
-    logger.info("seeding_store", path=str(seed_path))
-
-    # Import ingest lazily to avoid circular dependency at module level
-    from retrieval_pipeline.ingest import ingest_file
-
-    accepted, rejected = ingest_file(
-        seed_path,
-        chroma_persist_dir=settings.CHROMA_PERSIST_DIR,
-        collection_name=settings.CHROMA_COLLECTION,
-        embedding_model_name=settings.EMBEDDING_MODEL,
-    )
-    logger.info(
-        "seeding_complete",
-        accepted=accepted,
-        rejected=rejected,
-    )
+        logger.info(
+            "seeding_complete",
+            accepted=accepted,
+            rejected=rejected,
+        )
+    except Exception as err:
+        logger.warning("initialize_store_failed_degrading_softly", error=str(err))
 
 
 def retrieve_examples(
@@ -99,49 +107,50 @@ def retrieve_examples(
     """Query ChromaDB for the *top_k* examples most similar to *current_code*.
 
     Embeddings are computed locally — no network calls at query time.
-
-    Returns:
-        A list of dicts, each containing the stored metadata fields
-        (``bug_pattern``, ``code_snippet``, ``review_comment``,
-        ``fix_summary``) plus the ChromaDB ``id`` and ``distance``.
+    Degrades gracefully to empty list if embeddings or store are unavailable.
     """
-    collection = _get_collection()
-    if collection.count() == 0:
-        logger.warning("retrieve_empty_collection")
+    try:
+        collection = _get_collection()
+        if collection.count() == 0:
+            logger.warning("retrieve_empty_collection")
+            return []
+
+        embedder = _get_embedder()
+        query_embedding: list[float] = embedder.encode(
+            current_code,
+            show_progress_bar=False,
+        ).tolist()
+
+        results = collection.query(
+            query_embeddings=[query_embedding],  # type: ignore
+            n_results=min(top_k, collection.count()),
+            include=["metadatas", "distances", "documents"],
+        )
+
+        examples: list[dict[str, Any]] = []
+        ids: list[str] = results.get("ids", [[]])[0]
+        metadatas: list[dict[str, Any]] = results.get("metadatas", [[]])[0]  # type: ignore
+        distances: list[float] = results.get("distances", [[]])[0]  # type: ignore
+
+        for record_id, meta, dist in zip(ids, metadatas, distances, strict=False):
+            example: dict[str, Any] = {
+                "id": record_id,
+                "distance": dist,
+                **meta,
+            }
+            examples.append(example)
+
+        logger.info(
+            "retrieve_examples",
+            query_length=len(current_code),
+            top_k=top_k,
+            returned=len(examples),
+        )
+        return examples
+    except Exception as err:
+        logger.warning("retrieve_examples_failed_degrading_softly", error=str(err))
         return []
 
-    embedder = _get_embedder()
-    query_embedding: list[float] = embedder.encode(
-        current_code,
-        show_progress_bar=False,
-    ).tolist()
-
-    results = collection.query(
-        query_embeddings=[query_embedding],  # type: ignore
-        n_results=min(top_k, collection.count()),
-        include=["metadatas", "distances", "documents"],
-    )
-
-    examples: list[dict[str, Any]] = []
-    ids: list[str] = results.get("ids", [[]])[0]
-    metadatas: list[dict[str, Any]] = results.get("metadatas", [[]])[0]  # type: ignore
-    distances: list[float] = results.get("distances", [[]])[0]  # type: ignore
-
-    for record_id, meta, dist in zip(ids, metadatas, distances, strict=False):
-        example: dict[str, Any] = {
-            "id": record_id,
-            "distance": dist,
-            **meta,
-        }
-        examples.append(example)
-
-    logger.info(
-        "retrieve_examples",
-        query_length=len(current_code),
-        top_k=top_k,
-        returned=len(examples),
-    )
-    return examples
 
 
 def format_examples_for_prompt(examples: list[dict[str, Any]]) -> str:
