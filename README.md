@@ -62,7 +62,7 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
   a provider-neutral boundary that rejects records without provenance and
   executable before/after evidence. The 25-example retrieval seed is not
   training-ready, and no model training or upload is claimed. See
-  [training/README.md](training/README.md) and [AGENTS.md](AGENTS.md).
+  [training/README.md](training/README.md).
 - **Live infrastructure validation remains pending.** The Kubernetes bundle
   has offline render and manifest regressions but no target cluster; GitHub App
   end-to-end validation still needs a real App, public endpoint, and repository.
@@ -93,7 +93,8 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 │   ├── worker.py                      DB-polling queue consumer (atomic claiming)
 │   ├── repo_context.py                Per-round repo signals and language fallbacks
 │   ├── calibration.py                 Read-only telemetry calibration summaries
-│   └── corpus_eval.py                 Manifest-driven local corpus evaluator
+│   ├── corpus_eval.py                 Manifest-driven local corpus evaluator
+│   └── sanitizer.py                    Regex-based secret redaction for debate output
 │
 ├── api/
 │   ├── app.py                         FastAPI API + admin dashboard/listing
@@ -102,7 +103,7 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 │   └── schemas.py                     Pydantic request/response models
 │
 ├── storage/
-│   ├── models.py                      DebateSession + Round ORM models (SQLAlchemy)
+│   ├── models.py                      DebateSession + Round + WorkerHeartbeat ORM models (SQLAlchemy)
 │   └── db.py                          Engine, session factory, atomic claiming
 │
 ├── retrieval_pipeline/
@@ -135,13 +136,17 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 ├── demo_repo/                         Intentionally buggy inventory module
 ├── evals/                             eval_gate, eval_retrieval, eval_api, eval_reviewer
 │
+├── web/                               React SPA (Customer Dashboard + Admin Console)
+│   ├── src/components/                Live Debate View, Pipeline Stepper, Diff Viewer
+│   └── dist/                          Production build (served by FastAPI)
+│
 ├── Dockerfile                         Service image (API + worker)
 ├── docker/sandbox.Dockerfile          Locked-down gate-execution image
 ├── docker-compose.yml                 Local dev stack (builds from source)
 ├── docker-compose.prod.yml            Production stack (pulls CI-built images, GAP 16)
 ├── .env.example                       Secret-free runtime configuration template
 ├── .github/workflows/                 CI (lint/type/evals) and deploy (build/push/migrate/roll out)
-└── AGENTS.md                          Full operational reference
+└── AGENTS.md                          Agent behavioral contract (internal)
 
 ```
 
@@ -243,6 +248,29 @@ Tenant keys are rejected with `403`, and the endpoint is unavailable unless a
 key is explicitly registered with the admin role. The response excludes ticket
 text, webhook URLs, encrypted BYOK material, round transcripts, and gate
 command details.
+
+### Live Agent Workflow Dashboard
+
+Janus includes a React-based dashboard with two surfaces:
+
+- **Customer Dashboard** (`/dashboard`) -- tenant-scoped view showing only that
+  tenant's debates. Features a Review Operations Overview with metric cards and
+  sparklines, and a Live Debate View that streams the adversarial debate in real
+  time via SSE. The centerpiece is a visual pipeline stepper (Reviewer, Patcher,
+  Gate) with syntax-highlighted code diffs, distinct agent voices, and per-round
+  gate result checklists.
+
+- **Admin Console** (`/admin`) -- cross-tenant operational visibility with
+  all-tenant debate tables, worker heartbeat telemetry, and reviewer calibration
+  metrics.
+
+Both surfaces share the same underlying components but enforce strict data
+scoping: the customer path filters all queries to `request.tenant_id` and never
+exposes cross-tenant data, worker internals, or other tenants' repository names.
+
+SSE streaming endpoints (`/debates/{id}/stream` and `/admin/debates/{id}/stream`)
+push round-by-round updates for in-progress debates. Completed debates replay
+their full history as a backlog of events on connection.
 
 ---
 
@@ -413,8 +441,9 @@ incentives. It IS claiming to have built:
 
 Fine-tuning a Reviewer on a large mined PR dataset is explicit **future
 work** — the retrieval store starts curated and is designed to grow, but
-nothing here claims fine-tuned weights exist. See
-[AGENTS.md](AGENTS.md) for the full contract and fine-tuning interface spec.
+nothing here claims fine-tuned weights exist.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture
+and [docs/RUNBOOK.md](docs/RUNBOOK.md) for operations.
 
 ---
 
