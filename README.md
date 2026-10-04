@@ -140,6 +140,7 @@ Patcher proposes → Reviewer critiques (with a failing test it wrote and ran)
 │   ├── src/components/                Live Debate View, Pipeline Stepper, Diff Viewer
 │   └── dist/                          Production build (served by FastAPI)
 │
+├── assets/                            Media assets, banners, and UI design mockups
 ├── Dockerfile                         Service image (API + worker)
 ├── docker/sandbox.Dockerfile          Locked-down gate-execution image
 ├── docker-compose.yml                 Local dev stack (builds from source)
@@ -250,6 +251,10 @@ text, webhook URLs, encrypted BYOK material, round transcripts, and gate
 command details.
 
 ### Live Agent Workflow Dashboard
+
+<p align="center">
+  <img src="assets/UI.png" alt="Janus Live Agent Workflow Dashboard" width="850" />
+</p>
 
 Janus includes a React-based dashboard with two surfaces:
 

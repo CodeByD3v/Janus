@@ -63,7 +63,7 @@ export default function LiveDebateView({ debateId = "1024", apiKey = "", onBack 
     setExpandedRounds((prev) => ({ ...prev, [roundNum]: !prev[roundNum] }));
   };
 
-  // Default values matching UI.png reference mockup
+  // Default values matching assets/UI.png reference mockup
   const displayId = debate ? debate.id.substring(0, 4) : "1024";
   const repoName = debate?.pr_repo || debate?.repo_ref || "acme-inc/upload-service";
   const prNumber = debate?.pr_number ? `#${debate.pr_number}` : "#87";
